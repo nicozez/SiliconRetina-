@@ -28,6 +28,26 @@ def retina_model(img, prev_frame=None, threshold=0.05, receptive_field_size=3):
     
     return events_display, current
 
+# gray must become white, white must be red, black must be blue
+def colorize_events(events: np.ndarray) -> np.ndarray:
+    # Create a 3-channel color image (BGR format for OpenCV)
+    h, w = events.shape
+    events_display = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    # Gray (0.5) → White (255, 255, 255)
+    gray_mask = (events == 127)
+    events_display[gray_mask] = [255, 255, 255]
+    
+    # White (1.0) → Blue (0, 0, 255) in BGR format
+    white_mask = (events == 255)
+    events_display[white_mask] = [255, 0, 0]
+    
+    # Black (0.0) → Red (255, 0, 0) in BGR format
+    black_mask = (events == 0.0)
+    events_display[black_mask] = [0, 0, 255]
+    
+    return events_display
+
 if __name__ == "__main__":
     # --- Webcam capture setup ---
     cap = cv2.VideoCapture(0)
@@ -59,8 +79,10 @@ if __name__ == "__main__":
             receptive_field_size=receptive_field_size
         )
 
+        events_display_colorized = colorize_events(events_display)
+
         cv2.imshow('Webcam Input', gray)
-        cv2.imshow('Events (White=ON, Black=OFF, Gray=No Change)', events_display)
+        cv2.imshow('Events (Red=OFF, Blue=ON, White=No Change)', events_display_colorized)
 
         # Handle key presses
         key = cv2.waitKey(1) & 0xFF
