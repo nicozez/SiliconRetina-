@@ -22,6 +22,7 @@ class V2EEventDataLoader:
 
         # Single events dataset: shape (N, 4) where each row is [t, x, y, p]
         self.events = cast(h5py.Dataset, self.h5_file['events'])
+        self.timestamps = self.events[:, 0]
 
     def query_timerange(self, start: float, end: float) -> EventData:
         """Query events in a time range.
@@ -37,12 +38,9 @@ class V2EEventDataLoader:
         start_seconds = start
         end_seconds = end
         
-        # Get timestamp column (first column)
-        timestamps = self.events[:, 0]
-        
         # Find indices for time range
-        i0 = np.searchsorted(timestamps, start_seconds, side='left')
-        i1 = np.searchsorted(timestamps, end_seconds, side='right')
+        i0 = np.searchsorted(self.timestamps, start_seconds, side='left')
+        i1 = np.searchsorted(self.timestamps, end_seconds, side='right')
 
         # Extract events in range
         events_in_range = self.events[i0:i1]
@@ -126,17 +124,6 @@ class V2EEventDataLoader:
         print(f"Duration: {self.get_duration_seconds():.3f} seconds")
         print(f"Image dimensions: {self.height}x{self.width}")
         
-        # Show sample events for debugging
-        print("\nFirst 5 events [t, x, y, p]:")
-        for i in range(min(5, self.events.shape[0])):
-            t, x, y, p = self.events[i]
-            print(f"  {i}: t={t:.6f}s, x={x:.1f}, y={y:.1f}, p={p}")
-        
-        print("\nEvent statistics:")
-        print(f"  X range: {self.events[:, 1].min():.1f} - {self.events[:, 1].max():.1f}")
-        print(f"  Y range: {self.events[:, 2].min():.1f} - {self.events[:, 2].max():.1f}")
-        print(f"  P range: {self.events[:, 3].min()} - {self.events[:, 3].max()}")
-        print(f"  Unique polarities: {np.unique(self.events[:, 3])}")
         print("=" * 80)
 
     def get_start_time(self) -> float:
