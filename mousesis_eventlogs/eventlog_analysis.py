@@ -43,55 +43,56 @@ import gc
 import psutil
 
 def optimize_memory_for_high_performance():
-    """Optimize system settings for maximum performance processing."""
+    """Optimize system settings for ARM Mac performance."""
     # Force garbage collection
     gc.collect()
     
-    # Set NumPy to use optimal memory alignment
+    # Set NumPy to use optimal memory alignment for ARM
     np.set_printoptions(precision=6, suppress=True)
     
-    # Try to set thread affinity for better cache performance
+    # ARM Mac optimizations - single-threaded for better performance
     try:
         import os
-        os.environ['OMP_NUM_THREADS'] = str(psutil.cpu_count())
-        os.environ['MKL_NUM_THREADS'] = str(psutil.cpu_count())
+        import platform
+        
+        # ARM Mac specific optimizations
+        if platform.machine() == 'arm64':
+            # Single-threaded for ARM Mac (better performance than parallel)
+            os.environ['OMP_NUM_THREADS'] = '1'
+            os.environ['MKL_NUM_THREADS'] = '1'
+            os.environ['OPENBLAS_NUM_THREADS'] = '1'
+            
+            # Optimize for ARM's unified memory architecture
+            os.environ['NPY_NUM_BUILD_JOBS'] = '1'
+            
+            print("🍎 ARM Mac detected - using single-threaded optimizations")
+        else:
+            # Multi-threaded for other architectures
+            os.environ['OMP_NUM_THREADS'] = str(psutil.cpu_count())
+            os.environ['MKL_NUM_THREADS'] = str(psutil.cpu_count())
     except:
         pass
-
-@jit(nopython=True)
-def assign_events_to_frames(t: np.ndarray, start_time: float, end_time: float, delta_t: int) -> Tuple[np.ndarray, int]:
-    """Assign event timestamps to frame indices based on delta_t intervals."""
-    # Vectorized frame assignment
-    frame_indices = ((t - start_time) // delta_t).astype(np.int64)
-    max_frame = int((end_time - start_time) // delta_t)
-    
-    # Filter valid events
-    valid_mask = (frame_indices >= 0) & (frame_indices < max_frame)
-    return frame_indices[valid_mask], max_frame
 
 @jit(nopython=True)
 def convert_coordinates_to_pixel_indices(x: np.ndarray, y: np.ndarray, width: int) -> np.ndarray:
     """Convert (x,y) coordinates to linear pixel indices."""
     return y * width + x
 
-@jit(nopython=True, parallel=True)
-def count_events_per_frame_pixel_parallel(frame_indices: np.ndarray, pixel_coords: np.ndarray,
+@jit(nopython=True)
+def count_events_per_frame_pixel_optimized(frame_indices: np.ndarray, pixel_coords: np.ndarray,
                                           max_frame: int, total_pixels: int) -> np.ndarray:
     """
-    Count events per (frame, pixel) combination using parallel processing.
+    Count events per (frame, pixel) combination optimized for ARM Mac single-core performance.
     Returns sparse representation: [frame_idx, pixel_idx, count] arrays.
     """
-    # Convert to int32 for better performance
-    pixel_coords_int = pixel_coords.astype(np.int32)
+    # Use uint32 for better ARM performance and memory efficiency
+    pixel_coords_int = pixel_coords.astype(np.uint32)
     
-    # Create combined indices with better memory layout
-    combined_indices = frame_indices * total_pixels + pixel_coords_int
+    # Create combined indices with optimal memory layout for ARM
+    combined_indices = frame_indices.astype(np.uint64) * total_pixels + pixel_coords_int
     
-    # Use more efficient sorting for large datasets
-    if len(combined_indices) > 1000000:  # Use parallel sort for large datasets
-        sort_idx = np.argsort(combined_indices)
-    else:
-        sort_idx = np.argsort(combined_indices)
+    # Optimized sorting for ARM Mac - use default sort (stable sort not supported in Numba)
+    sort_idx = np.argsort(combined_indices)
     
     combined_sorted = combined_indices[sort_idx]
     
@@ -132,54 +133,42 @@ def count_events_per_frame_pixel_parallel(frame_indices: np.ndarray, pixel_coord
     return result
 
 @jit(nopython=True)
-def preprocess_events_for_all_delta_t_values(x: np.ndarray, y: np.ndarray, t: np.ndarray, 
-                             height: int, width: int, start_time: float, 
-                             end_time: float, delta_t_values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def assign_frames_and_pixels_direct(x: np.ndarray, y: np.ndarray, t: np.ndarray, 
+                                   width: int, start_time: float, delta_t: int) -> Tuple[np.ndarray, np.ndarray, int]:
     """
-    Pre-process all events once for all delta_t values to eliminate redundant operations.
-    Returns: all_pixel_coords, all_frame_indices_per_dt, max_frames_per_dt, valid_event_mask
+    Direct frame assignment and pixel coordinate conversion - no unnecessary preprocessing.
+    Returns: pixel_coords, frame_indices, max_frame
     """
-    total_events = len(x)
-    num_delta_ts = len(delta_t_values)
+    # Direct vectorized computation - no loops, no filtering, no pre-allocation
+    pixel_coords = y * width + x
+    frame_indices = ((t - start_time) // delta_t).astype(np.uint32)
+    max_frame = int((t[-1] - start_time) // delta_t) + 1
     
-    # Pre-allocate arrays
-    all_pixel_coords = np.zeros(total_events, dtype=np.int32)
-    all_frame_indices_per_dt = np.zeros((num_delta_ts, total_events), dtype=np.int32)
-    max_frames_per_dt = np.zeros(num_delta_ts, dtype=np.int32)
-    valid_event_mask = np.zeros(total_events, dtype=np.bool_)
-    
-    # Clamp coordinates once
-    x_clamped = np.clip(x.astype(np.int32), 0, width - 1)
-    y_clamped = np.clip(y.astype(np.int32), 0, height - 1)
-    
-    # Compute pixel coordinates once
-    for i in range(total_events):
-        all_pixel_coords[i] = y_clamped[i] * width + x_clamped[i]
-    
-    # Process each delta_t
-    for dt_idx in range(num_delta_ts):
-        delta_t = delta_t_values[dt_idx]
-        max_frame = int((end_time - start_time) // delta_t)
-        max_frames_per_dt[dt_idx] = max_frame
-        
-        # Compute frame indices for this delta_t
-        for i in range(total_events):
-            if t[i] >= start_time and t[i] < end_time:
-                frame_idx = int((t[i] - start_time) // delta_t)
-                if frame_idx >= 0 and frame_idx < max_frame:
-                    all_frame_indices_per_dt[dt_idx, i] = frame_idx
-                    valid_event_mask[i] = True
-    
-    return all_pixel_coords, all_frame_indices_per_dt, max_frames_per_dt, valid_event_mask
+    return pixel_coords, frame_indices, max_frame
 
-
-
+def optimize_memory_access_for_arm(data: np.ndarray) -> np.ndarray:
+    """
+    Optimize memory access patterns for ARM Mac's unified memory architecture.
+    Ensures data is aligned and accessed in cache-friendly patterns.
+    """
+    # Ensure data is contiguous and properly aligned for ARM
+    if not data.flags['C_CONTIGUOUS']:
+        data = np.ascontiguousarray(data)
+    
+    # Use ARM-optimized data types
+    if data.dtype == np.int32:
+        return data.astype(np.uint32)
+    elif data.dtype == np.int64:
+        return data.astype(np.uint64)
+    
+    return data
 
 
 @jit(nopython=True)
 def compute_collision_sparsity_entropy_metrics(sparse_data: np.ndarray, max_frame: int, total_pixels: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     """
     Compute collision rates, sparsity statistics, and entropy metrics in a single pass.
+    Optimized for ARM Mac with efficient data types and memory access patterns.
     Returns: collision_rates, frame_means, frame_vars, entropies, frames_processed, valid_frames
     """
     collision_rates = np.zeros(max_frame, dtype=np.float32)
@@ -189,9 +178,9 @@ def compute_collision_sparsity_entropy_metrics(sparse_data: np.ndarray, max_fram
     frames_processed = 0
     valid_frames = 0
     
-    # Pre-allocate all frame arrays for single-pass processing
-    frame_active_pixels = np.zeros(max_frame, dtype=np.int32)
-    frame_collision_pixels = np.zeros(max_frame, dtype=np.int32)
+    # Pre-allocate all frame arrays with ARM-optimized types
+    frame_active_pixels = np.zeros(max_frame, dtype=np.uint32)  # uint32 for ARM efficiency
+    frame_collision_pixels = np.zeros(max_frame, dtype=np.uint32)
     frame_sums = np.zeros(max_frame, dtype=np.float32)
     frame_sums_sq = np.zeros(max_frame, dtype=np.float32)
     
@@ -250,59 +239,39 @@ def compute_collision_sparsity_entropy_metrics(sparse_data: np.ndarray, max_fram
 
 
 
-def analyze_dvs_metrics_with_preprocessing(x: np.ndarray, y: np.ndarray, t: np.ndarray, height: int, width: int,
-                                       start_time: float, end_time: float, delta_t_values: List[int]) -> Dict:
+def analyze_dvs_metrics_direct(x: np.ndarray, y: np.ndarray, t: np.ndarray, height: int, width: int,
+                              start_time: float, end_time: float, delta_t_values: List[int]) -> Dict:
     """
-    Analyze DVS metrics using pre-processed data to eliminate redundant operations.
+    Analyze DVS metrics using direct computation - no unnecessary preprocessing.
     Computes collision rates, sparsity, and entropy for all delta_t values efficiently.
     """
     if len(x) == 0:
         return {}
     
-    print("🚀 ULTRA-FAST ANALYSIS: Pre-processing all events once...")
+    print("⚡ DIRECT ANALYSIS: No preprocessing overhead...")
     results = {'collision_rates': {}, 'sparsity_metrics': {}, 'information_metrics': {}}
     total_pixels = height * width
     
-    # Convert delta_t_values to numpy array for JIT
-    delta_t_array = np.array(delta_t_values, dtype=np.int32)
-    
-    # Pre-process ALL events once for all delta_t values
-    preprocess_start = time.time()
-    all_pixel_coords, all_frame_indices_per_dt, max_frames_per_dt, valid_event_mask = preprocess_events_for_all_delta_t_values(
-        x, y, t, height, width, start_time, end_time, delta_t_array)
-    preprocess_time = time.time() - preprocess_start
-    print(f"✅ Pre-processing completed in {preprocess_time:.2f}s")
-    
-    # Get valid events only
-    valid_events = np.where(valid_event_mask)[0]
-    print(f"📊 Valid events: {len(valid_events):,} out of {len(x):,}")
-    
     # Progress bar for delta-t values
-    pbar = tqdm(enumerate(delta_t_values), desc="Ultra-Fast Analysis", unit="Δt", 
+    pbar = tqdm(delta_t_values, desc="Memory-Efficient Analysis", unit="Δt", 
                 bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
     
-    for dt_idx, delta_t in pbar:
+    for delta_t in pbar:
         pbar.set_postfix_str(f"Δt={delta_t}μs")
         
-        # Extract pre-processed data for this delta_t
-        frame_indices = all_frame_indices_per_dt[dt_idx, valid_events]
-        pixel_coords = all_pixel_coords[valid_events]
-        max_frame = max_frames_per_dt[dt_idx]
+        # Direct computation - no preprocessing overhead
+        pixel_coords, frame_indices, max_frame = assign_frames_and_pixels_direct(
+            x, y, t, width, start_time, delta_t)
         
-        # Filter out invalid frame indices (should be rare after pre-processing)
-        valid_frame_mask = frame_indices > 0
-        if np.sum(valid_frame_mask) == 0:
+        if len(pixel_coords) == 0:
             # Empty results for this delta_t
             results['collision_rates'][delta_t] = {'mean_collision_rate': 0.0, 'std_collision_rate': 0.0, 'frames_processed': 0}
             results['sparsity_metrics'][delta_t] = {'mean_events_per_pixel': 0.0, 'total_events_per_frame': 0.0, 'variance_events_per_pixel': 0.0, 'frames_processed': 0}
             results['information_metrics'][delta_t] = {'mean_entropy': 0.0, 'std_entropy': 0.0, 'mutual_information': 0.0, 'frames_processed': 0}
             continue
         
-        frame_indices_valid = frame_indices[valid_frame_mask]
-        pixel_coords_valid = pixel_coords[valid_frame_mask]
-        
         # Ultra-fast sparse counting
-        sparse_data = count_events_per_frame_pixel_parallel(frame_indices_valid, pixel_coords_valid, max_frame, total_pixels)
+        sparse_data = count_events_per_frame_pixel_optimized(frame_indices, pixel_coords, max_frame, total_pixels)
         
         # Ultra-fast combined computation of ALL metrics in single pass
         collision_rates, frame_means, frame_vars, entropies, frames_processed, valid_frames = compute_collision_sparsity_entropy_metrics(sparse_data, max_frame, total_pixels)
@@ -323,6 +292,10 @@ def analyze_dvs_metrics_with_preprocessing(x: np.ndarray, y: np.ndarray, t: np.n
             'variance_events_per_pixel': float(np.mean(frame_vars)),
             'frames_processed': max_frame
         }
+        
+        # Clean up memory after processing this delta_t
+        del sparse_data, collision_rates, frame_means, frame_vars, entropies
+        cleanup_memory()
         
         if len(non_zero_entropies) > 0:
             results['information_metrics'][delta_t] = {
@@ -349,11 +322,11 @@ def compute_inter_event_intervals(x: np.ndarray, y: np.ndarray, t: np.ndarray, h
     
     print("⏱️  Computing inter-event intervals...")
     
-    # Clamp coordinates
-    x_int = np.clip(x.astype(np.int32), 0, width - 1)
-    y_int = np.clip(y.astype(np.int32), 0, height - 1)
+    # Clamp coordinates with ARM-optimized types
+    x_int = np.clip(x.astype(np.uint32), 0, width - 1)
+    y_int = np.clip(y.astype(np.uint32), 0, height - 1)
     
-    # Create pixel IDs
+    # Create pixel IDs with efficient memory layout
     pixel_ids = y_int * width + x_int
     
     # Sort by pixel then time for efficient IEI computation
@@ -426,7 +399,18 @@ def analyze_dvs_event_log(event_loader: EventDataLoader, start_time: float, end_
     
     # Load events with memory safety
     print("\n📊 Loading and preparing event data...")
+    initial_memory = get_memory_usage_mb()
+    print(f"💾 Initial memory usage: {initial_memory:.1f} MB")
+    
     x_np, y_np, t_np, p_np = event_loader.query_timerange(start_time, end_time)
+    
+    # Optimize data for ARM Mac memory architecture
+    x_np = optimize_memory_access_for_arm(x_np)
+    y_np = optimize_memory_access_for_arm(y_np)
+    t_np = optimize_memory_access_for_arm(t_np)
+    
+    after_load_memory = get_memory_usage_mb()
+    print(f"💾 Memory after loading: {after_load_memory:.1f} MB (+{after_load_memory - initial_memory:.1f} MB)")
     
     # Data validation
     print(f"Raw data sizes: x={len(x_np)}, y={len(y_np)}, t={len(t_np)}, p={len(p_np)}")
@@ -451,7 +435,7 @@ def analyze_dvs_event_log(event_loader: EventDataLoader, start_time: float, end_
     print("\n🔥 JIT compiling functions for maximum speed...")
     sample_size = min(1000, len(x_np))
     sample_indices = np.random.choice(len(x_np), sample_size, replace=False)
-    _ = assign_events_to_frames(t_np[sample_indices], start_time, start_time + 1000, 10)
+    _ = assign_frames_and_pixels_direct(x_np[sample_indices], y_np[sample_indices], t_np[sample_indices], width, start_time, 10)
     print("✅ JIT compilation complete")
     
     # Ultra-fast combined analysis (all metrics in single pass)
@@ -459,7 +443,7 @@ def analyze_dvs_event_log(event_loader: EventDataLoader, start_time: float, end_
     print("="*60)
     
     combined_start = time.time()
-    combined_results = analyze_dvs_metrics_with_preprocessing(x_np, y_np, t_np, height, width, start_time, end_time, delta_t_values)
+    combined_results = analyze_dvs_metrics_direct(x_np, y_np, t_np, height, width, start_time, end_time, delta_t_values)
     combined_time = time.time() - combined_start
     
     print(f"\n✅ Combined analysis completed in {combined_time:.2f}s")
@@ -477,11 +461,12 @@ def analyze_dvs_event_log(event_loader: EventDataLoader, start_time: float, end_
     info_results = combined_results['information_metrics']
     
     total_time = time.time() - total_start_time
+    final_memory = get_memory_usage_mb()
     print(f"\n🎉 ULTRA-FAST ANALYSIS COMPLETE!")
     print(f"⚡ Total processing time: {total_time:.2f}s")
     print(f"🚀 Performance: {len(x_np)/total_time/1000:.1f}K events/second")
-    print(f"💾 Peak memory usage: <{MAX_MEMORY_GB}GB (Ultra-Fast NumPy + Numba)")
-    print(f"🔥 Architecture: Pre-processed + Parallel JIT + Memory Optimized")
+    print(f"💾 Memory usage: {final_memory:.1f} MB (peak: {max(initial_memory, after_load_memory, final_memory):.1f} MB)")
+    print(f"🍎 Architecture: Memory-Efficient + Single-Core JIT + ARM Optimized")
     
     return {
         'collision_rates': collision_results,
@@ -496,7 +481,7 @@ def analyze_dvs_event_log(event_loader: EventDataLoader, start_time: float, end_
             'processing_time': total_time,
             'events_processed': len(x_np),
             'processing_speed_keps': len(x_np)/total_time/1000,  # K events per second
-            'architecture': 'Ultra-Fast Pre-processed + Parallel JIT + Memory Optimized',
+            'architecture': 'Memory-Efficient Streaming + Single-Core JIT + ARM Optimized',
             'memory_safe': True
         }
     }
@@ -645,6 +630,17 @@ def print_event_count_summary(results: Dict):
     if 'stats' in results:
         print(f"Total events: {results['stats']['total_events']:,}")
 
+def get_memory_usage_mb():
+    """Get current memory usage in MB."""
+    try:
+        process = psutil.Process()
+        return process.memory_info().rss / 1024 / 1024
+    except:
+        return 0
+
+def cleanup_memory():
+    """Force garbage collection to free memory."""
+    gc.collect()
 
 
 def main():
