@@ -10,15 +10,13 @@ Uses efficient HDF5 data access for fast loading.
 import argparse
 import h5py
 import numpy as np
-import sys
 import cv2
-from event_data_loader import EventDataLoader
+from event_loader import EventDataLoader
 
 def colorize_events(events: np.ndarray) -> np.ndarray:
     # Create a 3-channel color image (BGR format for OpenCV)
     h, w = events.shape
     events_display = np.zeros((h, w, 3), dtype=np.uint8)
-    print(np.unique(events))
     
     # Gray (0.5) → White (255, 255, 255)
     gray_mask = (events == 0)
@@ -46,27 +44,26 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    try:
-        with h5py.File(args.h5_file, 'r') as f:
-            loader = EventDataLoader(f)
-            height = f['images'].shape[1]
-            width = f['images'].shape[2]
-            
-            start_time = loader.get_start_time()
-            end_time = loader.get_end_time()
-            current_time = start_time
 
-            while current_time < end_time:
-                frame = loader.aggregate_time_range(current_time, current_time + args.duration)
-                events_display = colorize_events(frame)
-                cv2.imshow('2D Event Aggregate', events_display)
-                current_time += args.duration
+    with h5py.File(args.h5_file, 'r') as f:
+        loader = EventDataLoader(f)
+        loader.print_metadata()
+        height = f['images'].shape[1]
+        width = f['images'].shape[2]
+        
+        start_time = loader.get_start_time()
+        end_time = loader.get_end_time()
+        current_time = start_time
 
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
+        while current_time < end_time:
+            frame = loader.aggregate_time_range(current_time, current_time + args.duration)
+            events_display = colorize_events(frame)
+            cv2.imshow('2D Event Aggregate', events_display)
+            current_time += args.duration
 
-    except Exception as e:
-        print(f"Error: Cannot open HDF5 file '{args.h5_file}': {e}")
-        sys.exit(1)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+
+
 
