@@ -9,26 +9,69 @@ from event_data_loader import EventDataLoader, EventLog, VideoMetadata
 from typing import List
 
 @jit(nopython=True)
+def deduplicate_events(log: EventLog):    
+    x, y, t, p = log
+
+    # Even though events are kinda sorted by time in the event log,
+    # I do sort once again just be 100% sure.
+    # Either way, if the log is indeed sorted, it would take only O(n) time to check.
+    sort_idx = np.argsort(t)
+    sorted_t = t[sort_idx]
+    sorted_x = x[sort_idx]
+    sorted_y = y[sort_idx]
+    sorted_p = p[sort_idx]
+
+    unique_mask = np.ones(len(sorted_x), dtype=np.bool_)
+    for i in range(1, len(sorted_x)):
+        # Ignoring polality for now
+        if sorted_x[i] == sorted_x[i - 1] and sorted_y[i] == sorted_y[i - 1] and sorted_t[i] == sorted_t[i - 1]:
+            unique_mask[i] = False
+
+    print("Number of events before deduplication: ", len(x))
+    print("Number of events after deduplication: ", len(sorted_x[unique_mask]))
+    print("Percentage of duplicates: ", (len(x) - len(sorted_x[unique_mask])) / len(x) * 100)
+
+    return sorted_x[unique_mask], sorted_y[unique_mask], sorted_t[unique_mask], sorted_p[unique_mask]
+
+
+@jit(nopython=True)
 def calculate_collision_chance_for_delta_t_frames(log: EventLog, video_metadata: VideoMetadata, delta_t: int):
     height, width, start_time, end_time = video_metadata
     total_frames = ((end_time - start_time) // delta_t) + 1
 
     x, y, t, _ = log
 
+    # Aggregate per-frame pixel events
+    # Within the same timeframe [T1;T2] and within the same pixel (X, Y), all events must get the same index
     pixel_idx = y * width + x
     frame_idx = (t - start_time) // delta_t
     pixel_inside_frame_idx = frame_idx * width * height + pixel_idx
 
+    # Create an index mapping to avoid excessive memory usage
     sort_idx = np.argsort(pixel_inside_frame_idx)
     sorted_pixel_inside_frame_idx = pixel_inside_frame_idx[sort_idx]
 
+    # Example
+    # Input:      [0, 0, 4, 4, 4, 5, 6, 6]
+    # Input[1:]:  [0, 4, 4, 4, 5, 6, 6]     Shifted to the left by 1
+    # Input[:-1]: [0, 0, 4, 4, 4, 5, 6]     Shifted to the right by 1
+    # Boundary:   [F, T, F, F, T, T, F]
+    # Idx:        [1, 4, 5]
     boundary_idx = np.where(sorted_pixel_inside_frame_idx[1:] != sorted_pixel_inside_frame_idx[:-1])[0]
-    
-    total_active_pixels = np.zeros(total_frames, dtype=np.int32)
-    total_collision_pixels = np.zeros(total_frames, dtype=np.int32)
 
+    # Make nice to use indices
+    # Example
+    # Input:      [0, 0, 4, 4, 4, 5, 6, 6]
+    # Boundary:   [F, T, F, F, T, T, F]
+    # Idx:        [1, 4, 5]
+    # Desired:    [0;1], [2;4], [5], [6;7]
+    # Start:      [0, 2, 5, 6]
+    # End:        [1, 4, 5, 7]
     start_indices = np.concatenate((np.array([0]), boundary_idx + 1))
     end_indices = np.concatenate((boundary_idx + 1, np.array([len(sorted_pixel_inside_frame_idx)])))
+
+    total_active_pixels = np.zeros(total_frames, dtype=np.int32)
+    total_collision_pixels = np.zeros(total_frames, dtype=np.int32)
 
     for i in range(len(start_indices)):
         start_group = start_indices[i]
@@ -52,31 +95,10 @@ def calculate_collision_chance_for_delta_t_frames(log: EventLog, video_metadata:
     return mean_collision_rate_per_frame
 
 
+# np.mean is not jit-able? So we do it in raw python function
 def calculate_mean_collision_chance_for_delta_t(log: EventLog, video_metadata: VideoMetadata, delta_t: int):
     mean_collision_rate_per_frames = np.array(calculate_collision_chance_for_delta_t_frames(log, video_metadata, delta_t))
     return np.mean(mean_collision_rate_per_frames) * 100
-
-@jit(nopython=True)
-def deduplicate_events(log: EventLog, video_metadata: VideoMetadata):
-    width, _, _, _ = video_metadata
-    
-    x, y, t, p = log
-    sort_idx = np.argsort(t)
-    sorted_t = t[sort_idx]
-    sorted_x = x[sort_idx]
-    sorted_y = y[sort_idx]
-    sorted_p = p[sort_idx]
-
-    unique_mask = np.ones(len(sorted_x), dtype=np.bool_)
-    for i in range(1, len(sorted_x)):
-        if sorted_x[i] == sorted_x[i - 1] and sorted_y[i] == sorted_y[i - 1] and sorted_t[i] == sorted_t[i - 1]:
-            unique_mask[i] = False
-
-    print("Number of events before deduplication: ", len(x))
-    print("Number of events after deduplication: ", len(sorted_x[unique_mask]))
-    print("Percentage of duplicates: ", (len(x) - len(sorted_x[unique_mask])) / len(x) * 100)
-
-    return sorted_x[unique_mask], sorted_y[unique_mask], sorted_t[unique_mask], sorted_p[unique_mask]
 
 def plot_analysis_results(
     collision_chances: List[float], deduplicated_collision_chances: List[float], delta_t_values: List[int],
@@ -128,7 +150,7 @@ def main():
         event_loader.print_metadata()
         
         event_log = event_loader.query_timerange(event_loader.get_start_time(), event_loader.get_end_time())
-        deduplicated_event_log = deduplicate_events(event_log, event_loader.get_video_metadata())
+        deduplicated_event_log = deduplicate_events(event_log)
 
         video_metadata = event_loader.get_video_metadata()
 
@@ -147,8 +169,14 @@ def main():
             deduplicated_collision_chances.append(deduplicated_collision_chance)
 
         mean_collision_rate_per_frames = calculate_collision_chance_for_delta_t_frames(deduplicated_event_log, video_metadata, 10)
-
-        plot_analysis_results(collision_chances, deduplicated_collision_chances, args.delta_t, event_loader.get_start_time(), event_loader.get_end_time(), mean_collision_rate_per_frames)
+        plot_analysis_results(
+            collision_chances, 
+            deduplicated_collision_chances, 
+            args.delta_t, 
+            event_loader.get_start_time(), 
+            event_loader.get_end_time(), 
+            mean_collision_rate_per_frames,
+            )
 
 if __name__ == "__main__":
     main()
