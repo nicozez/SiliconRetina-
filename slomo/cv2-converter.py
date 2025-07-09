@@ -1,5 +1,8 @@
 """
 Converts a Video to SuperSloMo version
+
+Example usage:
+python3 cv2-converter.py path_to_input --checkpoint=path_to_model --output=path_to_output --scale=
 """
 from time import time
 import click
@@ -42,6 +45,15 @@ def load_models(checkpoint):
     states = torch.load(checkpoint, map_location='cpu')
     interp.load_state_dict(states['state_dictAT'])
     flow.load_state_dict(states['state_dictFC'])
+
+    torch.ao.quantization.quantize_dynamic(interp, {torch.nn.Conv2d, torch.nn.ConvTranspose2d}, dtype=torch.qint8, inplace=True)
+    torch.ao.quantization.quantize_dynamic(flow, {torch.nn.Conv2d, torch.nn.ConvTranspose2d}, dtype=torch.qint8, inplace=True)
+
+    for p in interp.parameters():
+        print(p.dtype)
+
+    interp.eval()
+    flow.eval()
 
 
 def interpolate_batch(frames, factor):

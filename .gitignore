@@ -1,2 +1,8 @@
 slomo/SuperSloMo.ckpt
 slomo/__pycache__
+eventlogs/__pycache__
+v2e/__pycache__
+dataset/
+.specstory/
+*/.DS_Store
+.DS_Store

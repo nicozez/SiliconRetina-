@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 from tqdm import tqdm
-from event_data_loader import EventDataLoader, EventLog, VideoMetadata
+from event_loader import EventDataLoader, EventLog, VideoMetadata
 from typing import List
 
 @jit(nopython=True)

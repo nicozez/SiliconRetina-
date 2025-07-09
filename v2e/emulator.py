@@ -98,18 +98,18 @@ class EventEmulator(object):
             seed: int = 0,
             output_folder: str = "/Users/paloma.hodje/Desktop/SURF/Retina/video_to_DVS_events/event_data", # give the path to outputs 
             dvs_h5: str = "events.h5", # file name
-            dvs_aedat2: str = None,
-            dvs_aedat4: str = None,
-            dvs_text: str = None,
+            dvs_aedat2: Optional[str] = None,
+            dvs_aedat4: Optional[str] = None,
+            dvs_text: Optional[str] = None,
             # change as you like to see 'baseLogFrame',
             # 'lpLogFrame', 'diff_frame'
-            show_dvs_model_state: str = None,
+            show_dvs_model_state: Optional[str] = None,
             save_dvs_model_state: bool = False,
-            output_width: int = None,
-            output_height: int = None,
+            output_width: Optional[int] = None,
+            output_height: Optional[int] = None,
             device: str = "cpu",
-            cs_lambda_pixels: float = None,
-            cs_tau_p_ms: float = None,
+            cs_lambda_pixels: Optional[float] = None,
+            cs_tau_p_ms: Optional[float] = None,
             hdr: bool = False,
             scidvs: bool = False,
             record_single_pixel_states=None,
@@ -215,7 +215,7 @@ class EventEmulator(object):
         self.output_height = output_height  # set on first frame
         self.show_dvs_model_state = show_dvs_model_state
         self.save_dvs_model_state = save_dvs_model_state
-        self.video_writers: dict[str, video_writer] = {}  # list of avi file writers for saving model state videos
+        self.video_writers: dict = {}  # list of avi file writers for saving model state videos
 
         # generate jax key for random process
         if seed != 0:
@@ -226,10 +226,18 @@ class EventEmulator(object):
         # h5 output
         self.output_folder = output_folder
         self.dvs_h5 = dvs_h5
-        self.dvs_h5_dataset = None
-        self.frame_h5_dataset = None
-        self.frame_ts_dataset = None
-        self.frame_ev_idx_dataset = None
+        self.dvs_h5_file = None
+        
+        # Event datasets (new schema)
+        self.p_dataset = None  # polarity
+        self.t_dataset = None  # timestamps
+        self.x_dataset = None  # x coordinates
+        self.y_dataset = None  # y coordinates
+        
+        # Frame datasets
+        self.images_dataset = None
+        self.img_ts_dataset = None
+        self.img2event_dataset = None
 
         # aedat or text output
         self.dvs_aedat2 = dvs_aedat2
@@ -314,14 +322,35 @@ class EventEmulator(object):
                 path = os.path.join(self.output_folder, dvs_h5)
                 path = checkAddSuffix(path, '.h5')
                 logger.info('opening event output dataset file ' + path)
-                self.dvs_h5 = h5py.File(path, "w")
+                self.dvs_h5_file = h5py.File(path, "w")
 
-                # for events
-                self.dvs_h5_dataset = self.dvs_h5.create_dataset(
-                    name="events",
-                    shape=(0, 4),
-                    maxshape=(None, 4),
+                # Create event datasets according to new schema
+                self.p_dataset = self.dvs_h5_file.create_dataset(
+                    name="p",
+                    shape=(0,),
+                    maxshape=(None,),
+                    dtype="uint8",
+                    compression="gzip")
+                    
+                self.t_dataset = self.dvs_h5_file.create_dataset(
+                    name="t",
+                    shape=(0,),
+                    maxshape=(None,),
                     dtype="uint32",
+                    compression="gzip")
+                    
+                self.x_dataset = self.dvs_h5_file.create_dataset(
+                    name="x",
+                    shape=(0,),
+                    maxshape=(None,),
+                    dtype="float64",
+                    compression="gzip")
+                    
+                self.y_dataset = self.dvs_h5_file.create_dataset(
+                    name="y",
+                    shape=(0,),
+                    maxshape=(None,),
+                    dtype="float64",
                     compression="gzip")
 
 
@@ -351,31 +380,33 @@ class EventEmulator(object):
 
     def prepare_storage(self, n_frames, frame_ts):
         # extra prepare for frame storage
-        if self.dvs_h5:
-            # for frame
-            self.frame_h5_dataset = self.dvs_h5.create_dataset(
-                name="frame",
-                shape=(n_frames, self.output_height, self.output_width),
+        if self.dvs_h5_file:
+            # Create images dataset (RGB format)
+            self.images_dataset = self.dvs_h5_file.create_dataset(
+                name="images",
+                shape=(n_frames, self.output_height, self.output_width, 3),
                 dtype="uint8",
                 compression="gzip")
 
-            frame_ts_arr = np.array(frame_ts, dtype=np.float32) * 1e6
-            self.frame_ts_dataset = self.dvs_h5.create_dataset(
-                name="frame_ts",
+            # Create img_ts dataset (timestamps in microseconds as float64)
+            frame_ts_arr = np.array(frame_ts, dtype=np.float64) * 1e6
+            self.img_ts_dataset = self.dvs_h5_file.create_dataset(
+                name="img_ts",
                 shape=(n_frames,),
-                data=frame_ts_arr.astype(np.uint32),
-                dtype="uint32",
+                data=frame_ts_arr,
+                dtype="float64",
                 compression="gzip")
-            # corresponding event idx
-            self.frame_ev_idx_dataset = self.dvs_h5.create_dataset(
-                name="frame_idx",
+                
+            # Create img2event dataset (event indices as int64)
+            self.img2event_dataset = self.dvs_h5_file.create_dataset(
+                name="img2event",
                 shape=(n_frames,),
-                dtype="uint64",
+                dtype="int64",
                 compression="gzip")
         else:
-            self.frame_h5_dataset = None
-            self.frame_ts_dataset = None
-            self.frame_ev_idx_dataset = None
+            self.images_dataset = None
+            self.img_ts_dataset = None
+            self.img2event_dataset = None
 
     def cleanup(self):
         if len(self.cs_steps_taken) > 1:
@@ -384,8 +415,8 @@ class EventEmulator(object):
             median_steps = np.median(self.cs_steps_taken)
             logger.info(
                 f'CSDVS steps statistics: mean+std= {mean_staps:.0f} + {std_steps:.0f} (median= {median_steps:.0f})')
-        if self.dvs_h5 is not None:
-            self.dvs_h5.close()
+        if self.dvs_h5_file is not None:
+            self.dvs_h5_file.close()
 
         if self.dvs_aedat2 is not None:
             self.dvs_aedat2.close()
@@ -617,10 +648,14 @@ class EventEmulator(object):
         # log_frame: the lowpass filtered brightness values
 
         # like a DAVIS, write frame into the file if it's HDF5
-        if self.frame_h5_dataset is not None:
-            # save frame data
-            self.frame_h5_dataset[self.frame_counter] = \
-                new_frame.astype(np.uint8)
+        if self.images_dataset is not None:
+            # save frame data - convert grayscale to RGB
+            if len(new_frame.shape) == 2:
+                # Convert grayscale to RGB by stacking the same image 3 times
+                rgb_frame = np.stack([new_frame, new_frame, new_frame], axis=-1)
+            else:
+                rgb_frame = new_frame
+            self.images_dataset[self.frame_counter] = rgb_frame.astype(np.uint8)
 
         # update frame counter
         self.frame_counter += 1
@@ -928,19 +963,29 @@ class EventEmulator(object):
                 logger.warning(f'nonmonotonic timestamp(s) at indices {idx}')
             if signnoise_label is not None:
                 signnoise_label=signnoise_label.cpu().numpy()
-            if self.dvs_h5 is not None:
-                # convert data to uint32 (microsecs) format
-                temp_events = np.array(events, dtype=np.float32)
-                temp_events[:, 0] = temp_events[:, 0] * 1e6
-                temp_events[temp_events[:, 3] == -1, 3] = 0
-                temp_events = temp_events.astype(np.uint32)
+            if self.dvs_h5_file is not None:
+                # convert data to appropriate formats for new schema
+                # temp_events is [t, x, y, p] where t is in seconds
+                temp_events = np.array(events, dtype=np.float64)
+                
+                # Extract components
+                t_data = (temp_events[:, 0] * 1e6).astype(np.uint32)  # timestamps in microseconds
+                x_data = temp_events[:, 1].astype(np.float64)         # x coordinates
+                y_data = temp_events[:, 2].astype(np.float64)         # y coordinates
+                p_data = temp_events[:, 3].astype(np.uint8)           # polarity: -1 -> 0, +1 -> 1
+                p_data[p_data == 255] = 0  # handle -1 converted to 255 in uint8
 
                 # save events
-                self.dvs_h5_dataset.resize(
-                    self.dvs_h5_dataset.shape[0] + temp_events.shape[0],
-                    axis=0)
+                num_events = temp_events.shape[0]
+                self.p_dataset.resize(self.p_dataset.shape[0] + num_events, axis=0)
+                self.t_dataset.resize(self.t_dataset.shape[0] + num_events, axis=0)
+                self.x_dataset.resize(self.x_dataset.shape[0] + num_events, axis=0)
+                self.y_dataset.resize(self.y_dataset.shape[0] + num_events, axis=0)
 
-                self.dvs_h5_dataset[-temp_events.shape[0]:] = temp_events
+                self.p_dataset[-num_events:] = p_data
+                self.t_dataset[-num_events:] = t_data
+                self.x_dataset[-num_events:] = x_data
+                self.y_dataset[-num_events:] = y_data
 
             if self.dvs_aedat2 is not None:
                 self.dvs_aedat2.appendEvents(events, signnoise_label=signnoise_label)
@@ -954,11 +999,11 @@ class EventEmulator(object):
                 else:
                     self.dvs_text.appendEvents(events)
 
-        if self.frame_ev_idx_dataset is not None:
+        if self.img2event_dataset is not None:
             # save frame event idx
             # determine after the events are added
-            self.frame_ev_idx_dataset[self.frame_counter - 1] = \
-                self.dvs_h5_dataset.shape[0]
+            self.img2event_dataset[self.frame_counter - 1] = \
+                self.p_dataset.shape[0]
 
         if not self.record_single_pixel_states is None:
             if self.single_pixel_sample_count<self.SINGLE_PIXEL_MAX_SAMPLES:
@@ -1103,73 +1148,152 @@ class EventEmulator(object):
 
 
 if __name__ == "__main__":
-    # define a emulator
+    import argparse
+    
+    # Set up command line argument parser
+    parser = argparse.ArgumentParser(description='DVS Event Emulator')
+    
+    # Required arguments
+    parser.add_argument('input_file', type=str, help='Path to input video file')
+    
+    # Optional arguments
+    parser.add_argument('--output_folder', type=str, default='./event_data',
+                        help='Output folder for event data (default: ./event_data)')
+    parser.add_argument('--output_file', type=str, default='events.h5',
+                        help='Output HDF5 filename (default: events.h5)')
+    parser.add_argument('--pos_thres', type=float, default=0.2,
+                        help='Positive event threshold (default: 0.2)')
+    parser.add_argument('--neg_thres', type=float, default=0.2,
+                        help='Negative event threshold (default: 0.2)')
+    parser.add_argument('--sigma_thres', type=float, default=0.03,
+                        help='Threshold variance (default: 0.03)')
+    parser.add_argument('--cutoff_hz', type=float, default=100,
+                        help='Cutoff frequency in Hz (default: 200)')
+    parser.add_argument('--leak_rate_hz', type=float, default=1,
+                        help='Leak rate in Hz (default: 1)')
+    parser.add_argument('--shot_noise_rate_hz', type=float, default=10,
+                        help='Shot noise rate in Hz (default: 10)')
+    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'],
+                        help='Device to use (default: cpu)')
+    parser.add_argument('--max_frames', type=int, default=None,
+                        help='Maximum number of frames to process (default: all)')
+    parser.add_argument('--show_progress', action='store_true',
+                        help='Show processing progress')
+    
+    args = parser.parse_args()
+    
+    # Check if input file exists
+    if not os.path.exists(args.input_file):
+        print(f"Error: Input file '{args.input_file}' does not exist.")
+        exit(1)
+    
+    # Create output folder if it doesn't exist
+    os.makedirs(args.output_folder, exist_ok=True)
+    
+    # Define emulator with command line arguments
     emulator = EventEmulator(
-        pos_thres=0.2,
-        neg_thres=0.2,
-        sigma_thres=0.03,
-        cutoff_hz=200,
-        leak_rate_hz=1,
-        shot_noise_rate_hz=10,
-        device="cpu",
+        pos_thres=args.pos_thres,
+        neg_thres=args.neg_thres,
+        sigma_thres=args.sigma_thres,
+        cutoff_hz=args.cutoff_hz,
+        leak_rate_hz=args.leak_rate_hz,
+        shot_noise_rate_hz=args.shot_noise_rate_hz,
+        device=args.device,
+        output_folder=args.output_folder,
+        dvs_h5=args.output_file,
     )
     
-
-    cap = cv2.VideoCapture(
-        os.path.join(os.environ["HOME"], "/Users/paloma.hodje/Desktop/SURF/data/output_slomo.mp4"))
-
-    # num of frames
+    # Open video capture
+    cap = cv2.VideoCapture(args.input_file)
+    
+    if not cap.isOpened():
+        print(f"Error: Cannot open video file '{args.input_file}'")
+        exit(1)
+    
+    # Get video properties
     fps = cap.get(cv2.CAP_PROP_FPS)
-    print("FPS: {}".format(fps))
     num_of_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print("Num of frames: {}".format(num_of_frames))
-
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    print(f"Input file: {args.input_file}")
+    print(f"Video properties:")
+    print(f"  FPS: {fps}")
+    print(f"  Frames: {num_of_frames}")
+    print(f"  Resolution: {width}x{height}")
+    print(f"Output file: {os.path.join(args.output_folder, args.output_file)}")
+    
+    # Set emulator dimensions
+    emulator.output_width = width
+    emulator.output_height = height
+    
     duration = num_of_frames / fps
     delta_t = 1 / fps
     current_time = 0.
-
-    print("Clip Duration: {}s".format(duration))
-    print("Delta Frame Tiem: {}s".format(delta_t))
+    
+    print(f"Clip Duration: {duration:.2f}s")
+    print(f"Delta Frame Time: {delta_t:.6f}s")
+    
+    # Determine number of frames to process
+    max_frames = args.max_frames if args.max_frames is not None else num_of_frames
+    frames_to_process = min(max_frames, num_of_frames)
+    
+    print(f"Processing {frames_to_process} frames...")
     print("=" * 50)
-
-    new_events = None
-
+    
+    # Prepare frame timestamps for storage
+    frame_timestamps = [i * delta_t for i in range(frames_to_process)]
+    emulator.prepare_storage(frames_to_process, frame_timestamps)
+    
     idx = 0
-    # Only Emulate the first 10 frame
-    while cap.isOpened():
-        # Capture frame-by-frame
-        ret, frame = cap.read()
-        if ret is True and idx < 10:
-            # convert it to Luma frame
-            luma_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            print("=" * 50)
-            print("Current Frame {} Time {}".format(idx, current_time))
-            print("-" * 50)
-
-            # # emulate events
-            new_events = emulator.generate_events(luma_frame, current_time)
-
-            # update time
-            current_time += delta_t
-
-            # print event stats
-            if new_events is not None:
-                num_events = new_events.shape[0]
-                start_t = new_events[0, 0]
-                end_t = new_events[-1, 0]
-                event_time = (new_events[-1, 0] - new_events[0, 0])
-                event_rate_kevs = (num_events / delta_t) / 1e3
-
-                print("Number of Events: {}\n"
-                      "Duration: {}\n"
-                      "Start T: {:.5f}\n"
-                      "End T: {:.5f}\n"
-                      "Event Rate: {:.2f}KEV/s".format(
-                    num_events, event_time, start_t, end_t,
-                    event_rate_kevs))
-            idx += 1
-            print("=" * 50)
-        else:
-            break
-
-    cap.release()
+    total_events = 0
+    
+    try:
+        while cap.isOpened() and idx < frames_to_process:
+            # Capture frame-by-frame
+            ret, frame = cap.read()
+            if ret:
+                # Convert to grayscale
+                luma_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                if args.show_progress:
+                    print(f"Processing frame {idx + 1}/{frames_to_process} (t={current_time:.4f}s)")
+                
+                # Generate events
+                new_events = emulator.generate_events(luma_frame, current_time)
+                
+                # Update time
+                current_time += delta_t
+                
+                # Print event stats
+                if new_events is not None:
+                    num_events = new_events.shape[0]
+                    total_events += num_events
+                    
+                    if args.show_progress:
+                        start_t = new_events[0, 0]
+                        end_t = new_events[-1, 0]
+                        event_rate_kevs = (num_events / delta_t) / 1e3
+                        
+                        print(f"  Events: {num_events}, Rate: {event_rate_kevs:.2f}KEV/s")
+                
+                idx += 1
+            else:
+                break
+    
+    except KeyboardInterrupt:
+        print("\nProcessing interrupted by user.")
+    
+    finally:
+        # Clean up
+        cap.release()
+        emulator.cleanup()
+        
+        print("=" * 50)
+        print(f"Processing complete!")
+        print(f"Processed {idx} frames")
+        print(f"Total events generated: {total_events}")
+        if idx > 0:
+            print(f"Average events per frame: {total_events / idx:.1f}")
+        print(f"Output saved to: {os.path.join(args.output_folder, args.output_file)}")
+        print("=" * 50)
