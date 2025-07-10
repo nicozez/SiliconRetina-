@@ -12,157 +12,162 @@ from PIL import Image
 import numpy as np
 import model
 from torchvision import transforms
-from torch.functional import F
+from torch.nn.functional import sigmoid
 import datetime
 
 torch.serialization.add_safe_globals([datetime.datetime])
-
-
 torch.set_grad_enabled(False)
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-trans_forward = transforms.ToTensor()
-trans_backward = transforms.ToPILImage()
+image_to_tensor = transforms.ToTensor()
+tensor_to_image = transforms.ToPILImage()
+
 if device != "cpu":
-    mean = [0.429, 0.431, 0.397]
-    mea0 = [-m for m in mean]
-    std = [1] * 3
-    trans_forward = transforms.Compose([trans_forward, transforms.Normalize(mean=mean, std=std)])
-    trans_backward = transforms.Compose([transforms.Normalize(mean=mea0, std=std), trans_backward])
+    normalization_mean = [0.429, 0.431, 0.397]
+    denormalization_mean = [-m for m in normalization_mean]
+    normalization_std = [1] * 3
+    image_to_tensor = transforms.Compose([image_to_tensor, transforms.Normalize(mean=normalization_mean, std=normalization_std)])
+    tensor_to_image = transforms.Compose([transforms.Normalize(mean=denormalization_mean, std=normalization_std), tensor_to_image])
 
-flow = model.UNet(6, 4).to(device)
-interp = model.UNet(20, 5).to(device)
-back_warp = None
+# Neural network models
+compensate_flow = model.UNet(6, 4).to(device) 
+interpolate = model.UNet(20, 5).to(device)     
+backward_warping : model.backWarp              # instantiated during convert_video
 
+def calculate_average_fps(current_avg, count, new_value):
+    return (current_avg * count/(count+1) + new_value / (count+1), count+1)
 
-def setup_back_warp(w, h):
-    global back_warp
-    with torch.set_grad_enabled(False):
-        back_warp = model.backWarp(w, h, device).to(device)
+def load_models(checkpoint_path):
+    """Load and quantize the neural network models from checkpoint."""
+    global interpolate, compensate_flow
+    
+    model_states = torch.load(checkpoint_path, map_location='cpu')
+    interpolate.load_state_dict(model_states['state_dictAT'])
+    compensate_flow.load_state_dict(model_states['state_dictFC'])
 
+    interpolate.eval()
+    compensate_flow.eval()
 
-def load_models(checkpoint):
-    states = torch.load(checkpoint, map_location='cpu')
-    interp.load_state_dict(states['state_dictAT'])
-    flow.load_state_dict(states['state_dictFC'])
+def load_batch(video_capture, batch_size, current_batch, target_width, target_height):
+    """Load a batch of frames from the video capture."""
+    if len(current_batch) > 0:
+        current_batch = [current_batch[-1]]  # Keep last frame for temporal continuity
 
-    torch.ao.quantization.quantize_dynamic(interp, {torch.nn.Conv2d, torch.nn.ConvTranspose2d}, dtype=torch.qint8, inplace=True)
-    torch.ao.quantization.quantize_dynamic(flow, {torch.nn.Conv2d, torch.nn.ConvTranspose2d}, dtype=torch.qint8, inplace=True)
-
-    for p in interp.parameters():
-        print(p.dtype)
-
-    interp.eval()
-    flow.eval()
-
-
-def interpolate_batch(frames, factor):
-    frame0 = torch.stack(frames[:-1])
-    frame1 = torch.stack(frames[1:])
-
-    i0 = frame0.to(device)
-    i1 = frame1.to(device)
-    ix = torch.cat([i0, i1], dim=1)
-
-    flow_out = flow(ix)
-    f01 = flow_out[:, :2, :, :]
-    f10 = flow_out[:, 2:, :, :]
-
-    frame_buffer = []
-    for i in range(1, factor):
-        t = i / factor
-        temp = -t * (1 - t)
-        co_eff = [temp, t * t, (1 - t) * (1 - t), temp]
-
-        ft0 = co_eff[0] * f01 + co_eff[1] * f10
-        ft1 = co_eff[2] * f01 + co_eff[3] * f10
-
-        gi0ft0 = back_warp(i0, ft0)
-        gi1ft1 = back_warp(i1, ft1)
-
-        iy = torch.cat((i0, i1, f01, f10, ft1, ft0, gi1ft1, gi0ft0), dim=1)
-        io = interp(iy)
-
-        ft0f = io[:, :2, :, :] + ft0
-        ft1f = io[:, 2:4, :, :] + ft1
-        vt0 = F.sigmoid(io[:, 4:5, :, :])
-        vt1 = 1 - vt0
-
-        gi0ft0f = back_warp(i0, ft0f)
-        gi1ft1f = back_warp(i1, ft1f)
-
-        co_eff = [1 - t, t]
-
-        ft_p = (co_eff[0] * vt0 * gi0ft0f + co_eff[1] * vt1 * gi1ft1f) / \
-               (co_eff[0] * vt0 + co_eff[1] * vt1)
-
-        frame_buffer.append(ft_p)
-
-    return frame_buffer
-
-
-def load_batch(video_in, batch_size, batch, w, h):
-    if len(batch) > 0:
-        batch = [batch[-1]]
-
-    for i in range(batch_size):
-        ok, frame = video_in.read()
-        if not ok:
+    for frame_idx in range(batch_size):
+        success, raw_frame = video_capture.read()
+        if not success:
             break
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame = Image.fromarray(frame)
-        frame = frame.resize((w, h), Image.Resampling.LANCZOS)
-        frame = frame.convert('RGB')
-        frame = trans_forward(frame)
-        batch.append(frame)
+        # Convert BGR to RGB and preprocess
+        rgb_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
+        pil_frame = Image.fromarray(rgb_frame)
+        resized_frame = pil_frame.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        rgb_converted_frame = resized_frame.convert('RGB')
+        tensor_frame = image_to_tensor(rgb_converted_frame)
+        current_batch.append(tensor_frame)
 
-    return batch
+    return current_batch
+
+def interpolate_batch(frame_batch, interpolation_factor):
+    """Generate intermediate frames between consecutive frames in the batch."""
+    previous_frames = torch.stack(frame_batch[:-1]).to(device)
+    next_frames = torch.stack(frame_batch[1:]).to(device)
+
+    concatenated_frames = torch.cat([previous_frames, next_frames], dim=1)
+
+    # Compute optical flow between consecutive frames
+    optical_flow_output = compensate_flow(concatenated_frames)
+    forward_flow = optical_flow_output[:, :2, :, :]  # Flow from frame0 to frame1
+    backward_flow = optical_flow_output[:, 2:, :, :]  # Flow from frame1 to frame0
+
+    interpolated_frames = []
+    for intermediate_idx in range(1, interpolation_factor):
+        time_ratio = intermediate_idx / interpolation_factor
+        quadratic_term = -time_ratio * (1 - time_ratio)
+
+        # Compute intermediate optical flows
+        intermediate_forward_flow = quadratic_term * forward_flow + (time_ratio * time_ratio) * backward_flow
+        intermediate_backward_flow = ((1 - time_ratio) * (1 - time_ratio)) * forward_flow + quadratic_term * backward_flow
+
+        warped_previous_frame = backward_warping(previous_frames, intermediate_forward_flow)
+        warped_next_frame = backward_warping(next_frames, intermediate_backward_flow)
+
+        # Prepare input for interpolation network
+        interpolation_input = torch.cat((previous_frames, next_frames, forward_flow, backward_flow, 
+                                       intermediate_backward_flow, intermediate_forward_flow, 
+                                       warped_next_frame, warped_previous_frame), dim=1)
+        interpolation_output = interpolate(interpolation_input)
+
+        # Refine optical flows and compute visibility maps
+        refined_forward_flow = interpolation_output[:, :2, :, :] + intermediate_forward_flow
+        refined_backward_flow = interpolation_output[:, 2:4, :, :] + intermediate_backward_flow
+        visibility_map_previous = sigmoid(interpolation_output[:, 4:5, :, :])
+        visibility_map_next = 1 - visibility_map_previous
+
+        # Final backward warping with refined flows
+        final_warped_previous = backward_warping(previous_frames, refined_forward_flow)
+        final_warped_next = backward_warping(next_frames, refined_backward_flow)
+
+        # Blend warped frames using visibility maps
+        interpolated_frame = ((1 - time_ratio) * visibility_map_previous * final_warped_previous + 
+                              time_ratio * visibility_map_next * final_warped_next) / \
+                             ((1 - time_ratio) * visibility_map_previous + 
+                               time_ratio * visibility_map_next)
+
+        interpolated_frames.append(interpolated_frame)
+
+    return interpolated_frames
 
 
-def denorm_frame(frame, w0, h0):
-    frame = frame.cpu()
-    frame = trans_backward(frame)
-    frame = frame.resize((w0, h0), Image.BILINEAR)
-    frame = frame.convert('RGB')
-    return np.array(frame)[:, :, ::-1].copy()
+def denormalize_frame(tensor_frame, original_width, original_height):
+    """Convert tensor frame back to numpy array for video writing."""
+    cpu_frame = tensor_frame.cpu()
+    pil_frame = tensor_to_image(cpu_frame)
+    resized_frame = pil_frame.resize((original_width, original_height), Image.Resampling.BILINEAR)
+    rgb_frame = resized_frame.convert('RGB')
+    bgr_frame = np.array(rgb_frame)[:, :, ::-1].copy()  # RGB to BGR for OpenCV
+    return bgr_frame
 
 
-def convert_video(source, dest, factor, batch_size=10, output_format='mp4v', output_fps=30):
-    vin = cv2.VideoCapture(source)
-    count = vin.get(cv2.CAP_PROP_FRAME_COUNT)
-    w0, h0 = int(vin.get(cv2.CAP_PROP_FRAME_WIDTH)), int(vin.get(cv2.CAP_PROP_FRAME_HEIGHT))
+def convert_video(input_path, output_path, interpolation_factor, batch_size=10, output_format='mp4v', output_fps=30):
+    """Convert video by interpolating frames to increase frame rate."""
+    global backward_warping
 
-    codec = cv2.VideoWriter_fourcc(*output_format)
-    vout = cv2.VideoWriter(dest, codec, float(output_fps), (w0, h0))
+    video_input = cv2.VideoCapture(input_path)
+    total_frame_count = video_input.get(cv2.CAP_PROP_FRAME_COUNT)
+    original_width, original_height = int(video_input.get(cv2.CAP_PROP_FRAME_WIDTH)), int(video_input.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    w, h = (w0 // 32) * 32, (h0 // 32) * 32
-    setup_back_warp(w, h)
+    video_codec = cv2.VideoWriter_fourcc(*output_format)
+    video_output = cv2.VideoWriter(output_path, video_codec, float(output_fps), (original_width, original_height))
 
-    done = 0
-    batch = []
+    # Ensure dimensions are multiples of 32 for network compatibility
+    network_width, network_height = (original_width // 32) * 32, (original_height // 32) * 32
+    backward_warping = model.backWarp(network_width, network_height, device).to(device)
+
+    processed_frames = 0
+    frame_batch = []
     while True:
-        batch = load_batch(vin, batch_size, batch, w, h)
-        if len(batch) == 1:
+        frame_batch = load_batch(video_input, batch_size, frame_batch, network_width, network_height)
+        if len(frame_batch) == 1:
             break
-        done += len(batch) - 1
+        processed_frames += len(frame_batch) - 1
 
-        intermediate_frames = interpolate_batch(batch, factor)
+        intermediate_frames = interpolate_batch(frame_batch, interpolation_factor)
         intermediate_frames = list(zip(*intermediate_frames))
 
-        for fid, iframe in enumerate(intermediate_frames):
-            vout.write(denorm_frame(batch[fid], w0, h0))
-            for frm in iframe:
-                vout.write(denorm_frame(frm, w0, h0))
+        for frame_idx, intermediate_frame_list in enumerate(intermediate_frames):
+            video_output.write(denormalize_frame(frame_batch[frame_idx], original_width, original_height))
+            for intermediate_frame in intermediate_frame_list:
+                video_output.write(denormalize_frame(intermediate_frame, original_width, original_height))
 
         try:
-            yield len(batch), done, count
+            yield len(frame_batch), processed_frames, total_frame_count
         except StopIteration:
             break
 
-    vout.write(denorm_frame(batch[0], w0, h0))
+    video_output.write(denormalize_frame(frame_batch[0], original_width, original_height))
 
-    vin.release()
-    vout.release()
+    video_input.release()
+    video_output.release()
 
 
 @click.command('Evaluate Model by converting a low-FPS video to high-fps')
@@ -172,18 +177,18 @@ def convert_video(source, dest, factor, batch_size=10, output_format='mp4v', out
 @click.option('--batch', default=2, help='Number of frames to process in single forward pass')
 @click.option('--scale', default=4, help='Scale Factor of FPS')
 @click.option('--fps', default=30, help='FPS of output video')
-def main(input, checkpoint, output, batch, scale, fps):
-    avg = lambda x, n, x0: (x * n/(n+1) + x0 / (n+1), n+1)
+def main(input, checkpoint, output, batch, scale, fps):    
     load_models(checkpoint)
-    t0 = time()
-    n0 = 0
-    fpx = 0
-    for dl, fd, fc in convert_video(input, output, int(scale), int(batch), output_fps=int(fps)):
-        fpx, n0 = avg(fpx, n0, dl / (time() - t0))
-        prg = int(100*fd/fc)
-        eta = (fc - fd) / fpx
-        print('\rDone: {:03d}% FPS: {:05.2f} ETA: {:.2f}s'.format(prg, fpx, eta) + ' '*5, end='')
-        t0 = time()
+    start_time = time()
+    frame_count = 0
+    average_fps = 0
+    
+    for batch_size, frames_done, total_frames in convert_video(input, output, int(scale), int(batch), output_fps=int(fps)):
+        average_fps, frame_count = calculate_average_fps(average_fps, frame_count, batch_size / (time() - start_time))
+        progress_percentage = int(100 * frames_done / total_frames)
+        estimated_time_remaining = (total_frames - frames_done) / average_fps
+        print('\rDone: {:03d}% FPS: {:05.2f} ETA: {:.2f}s'.format(progress_percentage, average_fps, estimated_time_remaining) + ' '*5, end='')
+        start_time = time()
 
 
 if __name__ == '__main__':

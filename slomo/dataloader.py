@@ -94,11 +94,11 @@ def _pil_loader(path, cropArea=None, resizeDim=None, frameFlip=0):
     with open(path, 'rb') as f:
         img = Image.open(f)
         # Resize image if specified.
-        resized_img = img.resize(resizeDim, Image.ANTIALIAS) if (resizeDim != None) else img
+        resized_img = img.resize(resizeDim, Image.Resampling.LANCZOS) if (resizeDim != None) else img
         # Crop image if crop area specified.
         cropped_img = img.crop(cropArea) if (cropArea != None) else resized_img
         # Flip image horizontally if specified.
-        flipped_img = cropped_img.transpose(Image.FLIP_LEFT_RIGHT) if frameFlip else cropped_img
+        flipped_img = cropped_img.transpose(Image.Transpose.FLIP_LEFT_RIGHT) if frameFlip else cropped_img
         return flipped_img.convert('RGB')
     
     
