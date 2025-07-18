@@ -7,61 +7,54 @@ import os
 import json
 import psutil
 
-PING_TIMEOUT = 5  # seconds
+CLIENT_HEARTBEAT_TIMEOUT_SECONDS = 2  # seconds
 
-class Supervisor:
-    def __init__(self, video_path, server_config, server_path, host_config, host_path, client_path, output_folder, ping_port):
-        self.video_path = video_path
-        self.server_config = server_config
-        self.server_path = server_path
-        self.host_config = host_config
-        self.host_path = host_path
-        self.client_path = client_path
-        self.output_folder = output_folder
-        self.ping_port = int(ping_port)
+class ProcessSupervisor:
+    def __init__(self, video_source_path, server_config_path, server_executable_path, host_config_path, host_executable_path, client_executable_path, output_directory_path, heartbeat_port):
+        self.video_source_path = video_source_path
+        self.server_config_path = server_config_path
+        self.server_executable_path = server_executable_path
+        self.host_config_path = host_config_path
+        self.host_executable_path = host_executable_path
+        self.client_executable_path = client_executable_path
+        self.output_directory_path = output_directory_path
+        self.heartbeat_port = int(heartbeat_port)
 
-        self.server_proc = None
-        self.host_proc = None
-        self.client_proc = None
+        self.server_process = None
+        self.host_process = None
+        self.client_process = None
 
-        self.last_ping = time.time()
-        self.shutdown_event = threading.Event()
-        self.restart_count = 0  # Track number of restarts
+        self.last_heartbeat_timestamp = time.time()
+        self.shutdown_signal = threading.Event()
+        self.client_restart_count = 0
 
-    def update_config_files(self):
-        """Update server_config.json and host_config.json with provided parameters"""
+    def update_configuration_files(self):
+        """Update server and host configuration files with provided parameters"""
         try:
             # Update server_config.json
-            print(f"[+] Updating {self.server_config} with video_path: {self.video_path}")
-            with open(self.server_config, 'r') as f:
+            print(f"[+] Updating {self.server_config_path} with video_path: {self.video_source_path}")
+            with open(self.server_config_path, 'r') as f:
                 server_config_data = json.load(f)
             
-            # Convert Windows backslashes to forward slashes for JSON compatibility
-            video_path_json = self.video_path.replace('\\', '/')
+            video_path_json = self.video_source_path.replace('\\', '/')
             server_config_data['source_path'] = video_path_json
             
-            with open(self.server_config, 'w') as f:
+            with open(self.server_config_path, 'w') as f:
                 json.dump(server_config_data, f, indent=4)
             
             # Update host_config.json
-            print(f"[+] Updating {self.host_config} with output_folder: {self.output_folder}")
+            print(f"[+] Updating {self.host_config_path} with output_folder: {self.output_directory_path}")
             
-            # Read the file as text first to fix any existing escape sequence issues
-            with open(self.host_config, 'r') as f:
+            with open(self.host_config_path, 'r') as f:
                 content = f.read()
             
-            # Fix any existing backslash escape issues by replacing single backslashes with double backslashes
-            # This handles cases where the JSON file already has malformed paths
             content = content.replace('\\', '\\\\')
-            
-            # Parse the fixed content
             host_config_data = json.loads(content)
             
-            # Convert Windows backslashes to forward slashes for JSON compatibility
-            output_folder_json = self.output_folder.replace('\\', '/')
+            output_folder_json = self.output_directory_path.replace('\\', '/')
             host_config_data['record_dir'] = output_folder_json
             
-            with open(self.host_config, 'w') as f:
+            with open(self.host_config_path, 'w') as f:
                 json.dump(host_config_data, f, indent=4)
                 
             print("[+] Configuration files updated successfully")
@@ -70,111 +63,57 @@ class Supervisor:
             print(f"[!] Error updating configuration files: {e}")
             raise
 
-    def start_server_with_monitoring(self):
-        """Start server process with output monitoring in background thread"""
-        print(f"[+] Starting server...")
+    def launch_process(self, path, name, args=None, use_new_terminal=False, capture_output=True, use_text_output=False):
+        """
+        Launch a subprocess with specified configuration.
         
-        # Set working directory to the directory containing the executable
-        working_dir = os.path.dirname(os.path.abspath(self.server_path))
-        print(f"[+] Working directory for server: {working_dir}")
-        
-        # Start server with output capture for monitoring
-        cmd = [self.server_path]
-        server_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-                                     cwd=working_dir, text=True, bufsize=1)
-        
-        # Start background thread to read server output
-        def monitor_server_output():
-            try:
-                if server_proc.stdout:
-                    for line in iter(server_proc.stdout.readline, ''):
-                        if line:
-                            print(f"[SERVER] {line.rstrip()}")
-            except Exception as e:
-                print(f"[!] Server output monitoring error: {e}")
-        
-        monitor_thread = threading.Thread(target=monitor_server_output, daemon=True)
-        monitor_thread.start()
-        
-        return server_proc
-
-    def start_process(self, path, name, args=None, new_terminal=False):
+        Args:
+            path: Path to the executable
+            name: Name of the process for logging
+            args: Optional list of arguments
+            use_new_terminal: Whether to open in new terminal (Windows only)
+            capture_output: Whether to capture stdout/stderr
+            use_text_output: Whether to use text mode for output (implies capture_output=True)
+        """
         print(f"[+] Starting {name}...")
         
-        # Set working directory to the directory containing the executable
-        working_dir = os.path.dirname(os.path.abspath(path))
-        print(f"[+] Working directory for {name}: {working_dir}")
+        working_directory = os.path.dirname(os.path.abspath(path))
+        print(f"[+] Working directory for {name}: {working_directory}")
         
-        if new_terminal:
-            # Start in a new terminal window (Windows) - use CREATE_NEW_CONSOLE
-            cmd = [path]
-            if args:
-                cmd.extend(args)
-            return subprocess.Popen(cmd, cwd=working_dir, creationflags=subprocess.CREATE_NEW_CONSOLE)
-        else:
-            # Start in the same process - but don't capture output for server to prevent blocking
-            cmd = [path]
-            if args:
-                cmd.extend(args)
-            # For server and host, don't capture output to prevent blocking
-            if name in ["server", "host"]:
-                return subprocess.Popen(cmd, cwd=working_dir)
-            else:
-                return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=working_dir)
+        command = [path]
+        if args:
+            command.extend(args)
+        
+        subprocess_kwargs = {'cwd': working_directory}
+        
+        if use_new_terminal:
+            subprocess_kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+        elif capture_output or use_text_output:
+            subprocess_kwargs['stdout'] = subprocess.PIPE
+            subprocess_kwargs['stderr'] = subprocess.STDOUT
+            if use_text_output:
+                subprocess_kwargs['text'] = True
+                subprocess_kwargs['bufsize'] = 1
+        
+        return subprocess.Popen(command, **subprocess_kwargs)
 
-    def restart_client(self):
-        self.restart_count += 1
-        print(f"[!] Restarting client (restart #{self.restart_count})...")
+    def restart_client_process(self):
+        self.client_restart_count += 1
+        print(f"[!] Restarting client (restart #{self.client_restart_count})...")
         
-        if self.client_proc:
+        if self.client_process:
             try:
-                # Get the process tree
-                parent = psutil.Process(self.client_proc.pid)
-                children = parent.children(recursive=True)
-                all_processes = [parent] + children
+                client_process_handle = psutil.Process(self.client_process.pid)
                 
-                print(f"[+] Process tree PIDs: {[p.pid for p in all_processes]}")
-                print(f"[+] Parent process: {parent.name()} (PID: {parent.pid})")
-                
-                # Check if process is still running before attempting termination
-                if not parent.is_running():
+                if not client_process_handle.is_running():
                     print("[+] Client process already terminated")
                     return
                 
-                # Use graceful termination first - don't interfere with network connections
-                print("[+] Attempting graceful termination...")
-                try:
-                    # Send SIGTERM (graceful shutdown)
-                    parent.terminate()
-                    parent.wait(timeout=5)
-                    print("[+] Client terminated gracefully")
-                except psutil.TimeoutExpired:
-                    print("[!] Graceful termination timeout, trying CTRL+C...")
-                    try:
-                        parent.send_signal(2)  # SIGINT (CTRL+C)
-                        parent.wait(timeout=5)
-                        print("[+] Client terminated via CTRL+C")
-                    except psutil.TimeoutExpired:
-                        print("[!] CTRL+C timeout, force killing...")
-                        # Only use force kill as last resort
-                        parent.kill()
-                        parent.wait(timeout=2)
-                        print("[+] Client force killed")
-                except Exception as e:
-                    print(f"[!] Error during graceful termination: {e}")
-                    print("[!] Attempting force kill...")
-                    parent.kill()
-                    parent.wait(timeout=2)
-                    print("[+] Client force killed")
-                
-                # Clean up any remaining child processes
-                for child in children:
-                    try:
-                        if child.is_running():
-                            child.terminate()
-                            child.wait(timeout=2)
-                    except:
-                        pass
+                # Graceful termination
+                print("[+] Terminating client...")
+                client_process_handle.terminate()
+                client_process_handle.wait(timeout=3)
+                print("[+] Client terminated gracefully")
                     
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 print("[+] Client process already terminated")
@@ -183,157 +122,105 @@ class Supervisor:
         
         # Wait for server to detect client disconnection
         print("[+] Waiting for server to detect client disconnection...")
-        time.sleep(3)  # Reduced wait time
+        time.sleep(1)
+           
+        # Start new client
+        print(f"[+] Starting new client (restart #{self.client_restart_count})...")
+        time.sleep(0.5)
         
-        # Check if server is still responsive before starting new client
-        print("[+] Checking if server is still responsive...")
-        server_ready = False
-        for attempt in range(3):  # Try up to 3 times
-            try:
-                # Try to connect to server port to see if it's accepting connections
-                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_sock.settimeout(2.0)
-                print(f"[+] Attempting to connect to server port 9000 (attempt {attempt + 1})...")
-                result = test_sock.connect_ex(('127.0.0.1', 9000))
-                
-                if result == 0:  # Connection successful
-                    print(f"[+] Server port 9000 is accepting connections!")
-                    test_sock.close()
-                    server_ready = True
-                    break
-                else:
-                    print(f"[!] Server port 9000 connection failed with error code: {result}")
-                    test_sock.close()
-                    time.sleep(2)
-            except Exception as e:
-                print(f"[!] Error checking server port: {e}")
-                try:
-                    test_sock.close()
-                except:
-                    pass
-                time.sleep(2)
+        self.last_heartbeat_timestamp = time.time()
+        self.client_process = self.launch_process(self.client_executable_path, "client", [str(self.heartbeat_port)], use_new_terminal=True)
         
-        if not server_ready:
-            print("[!] Warning: Server port appears to be unresponsive!")
-            print("[!] This might indicate the server has stopped responding")
-            # Don't start a new client if server is unresponsive
-            return
-        
-        print("[+] Server appears to be ready for new client connections")
-        
-        # Additional wait before starting new client
-        print(f"[+] Starting new client (restart #{self.restart_count})...")
-        time.sleep(2)
-        
-        # Reset ping timer before starting new client
-        self.last_ping = time.time()
-        print(f"[+] Reset ping timer for restart #{self.restart_count}")
-        
-        self.client_proc = self.start_process(self.client_path, "client", [str(self.ping_port)], new_terminal=True)
-        
-        if self.client_proc:
-            print(f"[+] New client started successfully (restart #{self.restart_count}, PID: {self.client_proc.pid})")
+        if self.client_process:
+            print(f"[+] New client started successfully (restart #{self.client_restart_count}, PID: {self.client_process.pid})")
         else:
-            print(f"[!] Failed to start new client (restart #{self.restart_count})")
+            print(f"[!] Failed to start new client (restart #{self.client_restart_count})")
 
-    def ping_listener(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
-            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_sock.bind(('localhost', self.ping_port))
-            server_sock.listen(1)
-            server_sock.settimeout(1.0)  # Set timeout for accept() calls
-            print(f"[+] Ping listener ready on port {self.ping_port}")
+    def start_heartbeat_listener(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as heartbeat_socket:
+            heartbeat_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            heartbeat_socket.bind(('localhost', self.heartbeat_port))
+            heartbeat_socket.listen(1)
+            heartbeat_socket.settimeout(1.0)
+            print(f"[+] Heartbeat listener ready on port {self.heartbeat_port}")
 
-            while not self.shutdown_event.is_set():
+            while not self.shutdown_signal.is_set():
                 try:
-                    conn, addr = server_sock.accept()
-                    print(f"[+] Ping connection from {addr} (restart #{self.restart_count})")
-                    conn.settimeout(1.0)  # Set timeout for recv() calls
+                    client_connection, client_address = heartbeat_socket.accept()
+                    print(f"[+] Heartbeat connection from {client_address} (restart #{self.client_restart_count})")
+                    client_connection.settimeout(1.0)
                     
-                    with conn:
-                        while not self.shutdown_event.is_set():
+                    with client_connection:
+                        while not self.shutdown_signal.is_set():
                             try:
-                                data = conn.recv(1024)
-                                if not data:
-                                    print(f"[!] Client disconnected (restart #{self.restart_count})")
+                                heartbeat_data = client_connection.recv(1024)
+                                if not heartbeat_data:
+                                    print(f"[!] Client disconnected (restart #{self.client_restart_count})")
                                     break
-                                self.last_ping = time.time()
-                                # Debug: Log successful pings occasionally
-                                if int(time.time()) % 30 == 0:  # Every 30 seconds
-                                    print(f"[DEBUG] Ping received from restart #{self.restart_count} client")
+                                self.last_heartbeat_timestamp = time.time()
                             except socket.timeout:
-                                continue  # Keep trying to receive
+                                continue
                             except Exception as e:
-                                print(f"[!] Ping receive error: {e}")
+                                print(f"[!] Heartbeat receive error: {e}")
                                 break
                     
-                    print("[+] Ping connection closed, waiting for new connection...")
+                    print("[+] Heartbeat connection closed, waiting for new connection...")
                     
                 except socket.timeout:
-                    continue  # Keep trying to accept new connections
+                    continue
                 except Exception as e:
-                    if not self.shutdown_event.is_set():
-                        print(f"[!] Ping listener error: {e}")
+                    if not self.shutdown_signal.is_set():
+                        print(f"[!] Heartbeat listener error: {e}")
                     break
 
-    def monitor_loop(self):
-        while not self.shutdown_event.is_set():
+    def monitor_client_heartbeat(self):
+        while not self.shutdown_signal.is_set():
             time.sleep(1)
-            time_since_last_ping = time.time() - self.last_ping
-            if time_since_last_ping > PING_TIMEOUT:
-                print(f"[!] Client ping timeout after {time_since_last_ping:.1f}s (limit: {PING_TIMEOUT}s). Restarting client...")
-                self.restart_client()
-                self.last_ping = time.time()
-            else:
-                # Debug: Show ping status every 10 seconds
-                if int(time_since_last_ping) % 10 == 0 and int(time_since_last_ping) > 0:
-                    print(f"[DEBUG] Time since last ping: {time_since_last_ping:.1f}s")
+            time_since_last_heartbeat = time.time() - self.last_heartbeat_timestamp
+            if time_since_last_heartbeat > CLIENT_HEARTBEAT_TIMEOUT_SECONDS:
+                print(f"[!] Client heartbeat timeout after {time_since_last_heartbeat:.1f}s (limit: {CLIENT_HEARTBEAT_TIMEOUT_SECONDS}s). Restarting client...")
+                self.restart_client_process()
+                self.last_heartbeat_timestamp = time.time()
 
     def run(self):
         try:
-            # Update configuration files first
-            self.update_config_files()
+            self.update_configuration_files()
             
-            os.makedirs(self.output_folder, exist_ok=True)
-            self.server_proc = self.start_server_with_monitoring()
+            os.makedirs(self.output_directory_path, exist_ok=True)
+            self.server_process = self.launch_process(self.server_executable_path, "server", capture_output=True, use_text_output=True)
             
-            # Check if server started successfully
-            if self.server_proc.poll() is not None:
+            if self.server_process.poll() is not None:
                 print(f"[!] Server process failed to start or exited immediately")
-                # Since we're monitoring output in background, we can't get error details here
                 return
             
-            print(f"[+] Server process started with PID: {self.server_proc.pid}")
-            
-            # Wait a bit for server to fully initialize
+            print(f"[+] Server process started with PID: {self.server_process.pid}")
             print("[+] Waiting for server to initialize...")
-            time.sleep(3)
+            time.sleep(2)
             
-            self.host_proc = self.start_process(self.host_path, "host")
-            self.client_proc = self.start_process(self.client_path, "client", [str(self.ping_port)], new_terminal=True)
+            self.host_process = self.launch_process(self.host_executable_path, "host", capture_output=False)
+            self.client_process = self.launch_process(self.client_executable_path, "client", [str(self.heartbeat_port)], use_new_terminal=True)
 
-            listener_thread = threading.Thread(target=self.ping_listener, daemon=True)
+            listener_thread = threading.Thread(target=self.start_heartbeat_listener, daemon=True)
             listener_thread.start()
 
-            self.monitor_loop()
+            self.monitor_client_heartbeat()
 
         except KeyboardInterrupt:
             print("\n[!] Supervisor shutting down...")
         finally:
-            self.shutdown_event.set()
-            # Graceful shutdown of all processes
-            for proc_name, proc in [("server", self.server_proc), ("host", self.host_proc), ("client", self.client_proc)]:
-                if proc:
+            self.shutdown_signal.set()
+            for process_name, process_handle in [("server", self.server_process), ("host", self.host_process), ("client", self.client_process)]:
+                if process_handle:
                     try:
-                        print(f"[+] Terminating {proc_name} process...")
-                        proc.terminate()
-                        proc.wait(timeout=5)
-                        print(f"[+] {proc_name} process terminated gracefully")
+                        print(f"[+] Terminating {process_name} process...")
+                        process_handle.terminate()
+                        process_handle.wait(timeout=3)
+                        print(f"[+] {process_name} process terminated gracefully")
                     except subprocess.TimeoutExpired:
-                        print(f"[!] {proc_name} process didn't terminate gracefully, force killing...")
-                        proc.kill()
+                        print(f"[!] {process_name} process didn't terminate gracefully, force killing...")
+                        process_handle.kill()
                     except Exception as e:
-                        print(f"[!] Error terminating {proc_name} process: {e}")
+                        print(f"[!] Error terminating {process_name} process: {e}")
             print("[+] Clean shutdown complete.")
 
 if __name__ == "__main__":
@@ -341,14 +228,14 @@ if __name__ == "__main__":
         print("Usage: python supervisor.py video_path server_config.json server.exe host_config.json host.exe client.exe output_folder port")
         sys.exit(1)
 
-    sup = Supervisor(
-        video_path=sys.argv[1],
-        server_config=sys.argv[2],
-        server_path=sys.argv[3],
-        host_config=sys.argv[4],
-        host_path=sys.argv[5],
-        client_path=sys.argv[6],
-        output_folder=sys.argv[7],
-        ping_port=sys.argv[8],
+    sup = ProcessSupervisor(
+        video_source_path=sys.argv[1],
+        server_config_path=sys.argv[2],
+        server_executable_path=sys.argv[3],
+        host_config_path=sys.argv[4],
+        host_executable_path=sys.argv[5],
+        client_executable_path=sys.argv[6],
+        output_directory_path=sys.argv[7],
+        heartbeat_port=sys.argv[8],
     )
     sup.run()

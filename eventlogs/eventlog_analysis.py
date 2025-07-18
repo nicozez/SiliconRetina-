@@ -100,15 +100,12 @@ def calculate_mean_collision_chance_for_delta_t(log: EventLog, video_metadata: V
     mean_collision_rate_per_frames = np.array(calculate_collision_chance_for_delta_t_frames(log, video_metadata, delta_t))
     return np.mean(mean_collision_rate_per_frames) * 100
 
-def plot_analysis_results(
-    collision_chances: List[float], deduplicated_collision_chances: List[float], delta_t_values: List[int],
-    start_time: int, end_time: int,
-    mean_collision_rate_per_frames: List[List[float]]):
+def plot_analysis_results(collision_chances: List[float], deduplicated_collision_chances: List[float], delta_t_values: List[int]):
     """
     Create visualization plots for all analysis results.
     """    
 
-    fig, ax = plt.subplots(3, 1, figsize=(10, 10))
+    fig, ax = plt.subplots(2, 1, figsize=(10, 10))
 
     ax[0].plot(delta_t_values, collision_chances, 'o-', linewidth=2, markersize=8)
     plt.xlabel('Δt (μs)')
@@ -122,21 +119,12 @@ def plot_analysis_results(
     ax[1].set_title('Deduplicated Collision Chance vs Δt')
     ax[1].grid(True, alpha=0.3)
 
-    time_range = end_time - start_time
-    frame_range = time_range // delta_t_values[0]
-
-    ax[2].plot(range(frame_range + 1)[0:10000], mean_collision_rate_per_frames[0:10000], 'o-', linewidth=2, markersize=8)
-    ax[2].set_xlabel('Frame Index')
-    ax[2].set_ylabel('Mean Collision Rate per Frame')
-    ax[2].set_title('Mean Collision Rate per Frame vs Frame Index')
-    ax[2].grid(True, alpha=0.3)
-    plt.show()
+    return plt
 
 def main():
     parser = argparse.ArgumentParser(description='DVS Simulation Analysis')
     parser.add_argument('h5_file', help='Path to HDF5 event log file')
-    parser.add_argument('--duration', '-d', type=float, default=500000, help='Duration in microseconds (default: 500000)')
-    parser.add_argument('--delta-t', nargs='+', type=int, default=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100], 
+    parser.add_argument('--delta-t', nargs='+', type=int, default=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300, 310, 320, 330, 340, 350, 360, 370, 380, 390, 400, 410, 420, 430, 440, 450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 590, 600, 610, 620, 630, 640, 650, 660, 670, 680, 690, 700, 710, 720, 730, 740, 750, 760, 770, 780, 790, 800, 810, 820, 830, 840, 850, 860, 870, 880, 890, 900, 910, 920, 930, 940, 950, 960, 970, 980, 990, 1000], 
                        help='Delta-t values to test (default: 10 to 100 μs)')
     
     args = parser.parse_args()
@@ -168,15 +156,12 @@ def main():
             collision_chances.append(mean_collision_chance)
             deduplicated_collision_chances.append(deduplicated_collision_chance)
 
-        mean_collision_rate_per_frames = calculate_collision_chance_for_delta_t_frames(deduplicated_event_log, video_metadata, 10)
-        plot_analysis_results(
-            collision_chances, 
-            deduplicated_collision_chances, 
-            args.delta_t, 
-            event_loader.get_start_time(), 
-            event_loader.get_end_time(), 
-            mean_collision_rate_per_frames,
-            )
+        plt = plot_analysis_results(collision_chances, deduplicated_collision_chances, args.delta_t)
+
+        filename = os.path.basename(args.h5_file)
+        output_filename = filename.replace('.h5', '_eventlog_analysis.png')
+        plt.savefig(output_filename, dpi=300, bbox_inches='tight')
+        plt.show()
 
 if __name__ == "__main__":
     main()
