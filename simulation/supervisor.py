@@ -10,15 +10,24 @@ import psutil
 CLIENT_HEARTBEAT_TIMEOUT_SECONDS = 2  # seconds
 
 class ProcessSupervisor:
-    def __init__(self, video_source_path, server_config_path, server_executable_path, host_config_path, host_executable_path, client_executable_path, output_directory_path, heartbeat_port):
-        self.video_source_path = video_source_path
-        self.server_config_path = server_config_path
-        self.server_executable_path = server_executable_path
-        self.host_config_path = host_config_path
-        self.host_executable_path = host_executable_path
-        self.client_executable_path = client_executable_path
-        self.output_directory_path = output_directory_path
-        self.heartbeat_port = int(heartbeat_port)
+    def __init__(self, config_path):
+        """
+        Initialize ProcessSupervisor with configuration from a JSON file.
+        
+        Args:
+            config_path: Path to the configuration JSON file
+        """
+        self.config = self.load_config(config_path)
+        
+        # Extract configuration values
+        self.video_source_path = self.config['video_source_path']
+        self.server_config_path = self.config['server_config_path']
+        self.server_executable_path = self.config['server_executable_path']
+        self.host_config_path = self.config['host_config_path']
+        self.host_executable_path = self.config['host_executable_path']
+        self.client_executable_path = self.config['client_executable_path']
+        self.output_directory = self.config['output_directory']
+        self.heartbeat_port = int(self.config['heartbeat_port'])
 
         self.server_process = None
         self.host_process = None
@@ -28,72 +37,141 @@ class ProcessSupervisor:
         self.shutdown_signal = threading.Event()
         self.client_restart_count = 0
 
-    def update_configuration_files(self):
-        """Update server and host configuration files with provided parameters"""
-        try:
-            # Update server_config.json
-            print(f"[+] Updating {self.server_config_path} with video_path: {self.video_source_path}")
-            with open(self.server_config_path, 'r') as f:
-                server_config_data = json.load(f)
-            
-            video_path_json = self.video_source_path.replace('\\', '/')
-            server_config_data['source_path'] = video_path_json
-            
-            with open(self.server_config_path, 'w') as f:
-                json.dump(server_config_data, f, indent=4)
-            
-            # Update host_config.json
-            print(f"[+] Updating {self.host_config_path} with output_folder: {self.output_directory_path}")
-            
-            with open(self.host_config_path, 'r') as f:
-                content = f.read()
-            
-            content = content.replace('\\', '\\\\')
-            host_config_data = json.loads(content)
-            
-            output_folder_json = self.output_directory_path.replace('\\', '/')
-            host_config_data['record_dir'] = output_folder_json
-            
-            with open(self.host_config_path, 'w') as f:
-                json.dump(host_config_data, f, indent=4)
-                
-            print("[+] Configuration files updated successfully")
-            
-        except Exception as e:
-            print(f"[!] Error updating configuration files: {e}")
-            raise
-
-    def launch_process(self, path, name, args=None, use_new_terminal=False, capture_output=True, use_text_output=False):
+    def load_config(self, config_path):
         """
-        Launch a subprocess with specified configuration.
+        Load configuration from JSON file.
         
         Args:
-            path: Path to the executable
-            name: Name of the process for logging
-            args: Optional list of arguments
-            use_new_terminal: Whether to open in new terminal (Windows only)
-            capture_output: Whether to capture stdout/stderr
-            use_text_output: Whether to use text mode for output (implies capture_output=True)
+            config_path: Path to the configuration file
+            
+        Returns:
+            dict: Configuration dictionary
+            
+        Raises:
+            FileNotFoundError: If config file doesn't exist
+            json.JSONDecodeError: If config file is invalid JSON
+            KeyError: If required configuration keys are missing
         """
-        print(f"[+] Starting {name}...")
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            # Validate required keys
+            required_keys = [
+                'video_source_path',
+                'server_config_path', 
+                'server_executable_path',
+                'host_config_path',
+                'host_executable_path',
+                'client_executable_path',
+                'output_directory',
+                'heartbeat_port'
+            ]
+            
+            missing_keys = [key for key in required_keys if key not in config]
+            if missing_keys:
+                raise KeyError(f"Missing required configuration keys: {missing_keys}")
+            
+            return config
+            
+        except FileNotFoundError:
+            print(f"[!] Configuration file not found: {config_path}")
+            raise
+        except json.JSONDecodeError as e:
+            print(f"[!] Invalid JSON in configuration file: {e}")
+            raise
+        except KeyError as e:
+            print(f"[!] Configuration error: {e}")
+            raise
+
+    def update_server_configuration(self):
+        try:
+            print(f"[+] Updating {self.server_config_path} with video_path: {self.video_source_path}")
+
+            with open(self.server_config_path, "r+") as f:
+                server_config_data = json.load(f)
+                
+                video_path_json = self.video_source_path.replace('\\', '/')
+                server_config_data['source_path'] = video_path_json
+                
+                f.seek(0)
+                f.truncate()
+                
+                json.dump(server_config_data, f, indent=4)
+            
+            print(f"[+] Server configuration updated successfully")
+            
+        except Exception as e:
+            print(f"[!] Error updating server configuration: {e}")
+            raise
+
+    def update_host_configuration(self):
+        try:
+            print(f"[+] Updating {self.host_config_path} with output_folder: {self.output_directory}")
+            
+            with open(self.host_config_path, 'r+') as f:
+                host_config_data = json.load(f)
+                
+                output_folder_json = self.output_directory.replace('\\', '/')
+                host_config_data['record_dir'] = output_folder_json
+                
+                f.seek(0)
+                f.truncate()
+                
+                json.dump(host_config_data, f, indent=4)
+            
+            print(f"[+] Host configuration updated successfully")
+            
+        except Exception as e:
+            print(f"[!] Error updating host configuration: {e}")
+            raise
+
+    def update_configuration_files(self):
+        self.update_server_configuration()
+        self.update_host_configuration()
+        print("[+] All configuration files updated successfully")
+
+    def launch_server(self):
+        """Launch the server process without capturing output to prevent blocking"""
+        print("[+] Starting server...")
         
-        working_directory = os.path.dirname(os.path.abspath(path))
-        print(f"[+] Working directory for {name}: {working_directory}")
+        working_directory = os.path.dirname(os.path.abspath(self.server_executable_path))
+        print(f"[+] Working directory for server: {working_directory}")
         
-        command = [path]
-        if args:
-            command.extend(args)
+        command = [self.server_executable_path]
+        
+        subprocess_kwargs = {
+            'cwd': working_directory
+        }
+        
+        return subprocess.Popen(command, **subprocess_kwargs)
+
+    def launch_host(self):
+        """Launch the host process without capturing output"""
+        print("[+] Starting host...")
+        
+        working_directory = os.path.dirname(os.path.abspath(self.host_executable_path))
+        print(f"[+] Working directory for host: {working_directory}")
+        
+        command = [self.host_executable_path]
         
         subprocess_kwargs = {'cwd': working_directory}
         
-        if use_new_terminal:
-            subprocess_kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
-        elif capture_output or use_text_output:
-            subprocess_kwargs['stdout'] = subprocess.PIPE
-            subprocess_kwargs['stderr'] = subprocess.STDOUT
-            if use_text_output:
-                subprocess_kwargs['text'] = True
-                subprocess_kwargs['bufsize'] = 1
+        return subprocess.Popen(command, **subprocess_kwargs)
+
+    def launch_client(self):
+        """Launch the client process with heartbeat port argument"""
+        print("[+] Starting client...")
+        
+        working_directory = os.path.dirname(os.path.abspath(self.client_executable_path))
+        print(f"[+] Working directory for client: {working_directory}")
+        
+        command = [self.client_executable_path, str(self.heartbeat_port)]
+        
+        subprocess_kwargs = {
+            'cwd': working_directory,
+            'creationflags': subprocess.CREATE_NEW_CONSOLE
+        }
         
         return subprocess.Popen(command, **subprocess_kwargs)
 
@@ -129,7 +207,7 @@ class ProcessSupervisor:
         time.sleep(0.5)
         
         self.last_heartbeat_timestamp = time.time()
-        self.client_process = self.launch_process(self.client_executable_path, "client", [str(self.heartbeat_port)], use_new_terminal=True)
+        self.client_process = self.launch_client()
         
         if self.client_process:
             print(f"[+] New client started successfully (restart #{self.client_restart_count}, PID: {self.client_process.pid})")
@@ -186,8 +264,8 @@ class ProcessSupervisor:
         try:
             self.update_configuration_files()
             
-            os.makedirs(self.output_directory_path, exist_ok=True)
-            self.server_process = self.launch_process(self.server_executable_path, "server", capture_output=True, use_text_output=True)
+            os.makedirs(self.output_directory, exist_ok=True)
+            self.server_process = self.launch_server()
             
             if self.server_process.poll() is not None:
                 print(f"[!] Server process failed to start or exited immediately")
@@ -197,8 +275,8 @@ class ProcessSupervisor:
             print("[+] Waiting for server to initialize...")
             time.sleep(2)
             
-            self.host_process = self.launch_process(self.host_executable_path, "host", capture_output=False)
-            self.client_process = self.launch_process(self.client_executable_path, "client", [str(self.heartbeat_port)], use_new_terminal=True)
+            self.host_process = self.launch_host()
+            self.client_process = self.launch_client()
 
             listener_thread = threading.Thread(target=self.start_heartbeat_listener, daemon=True)
             listener_thread.start()
@@ -224,18 +302,28 @@ class ProcessSupervisor:
             print("[+] Clean shutdown complete.")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 9:
-        print("Usage: python supervisor.py video_path server_config.json server.exe host_config.json host.exe client.exe output_folder port")
+    if len(sys.argv) != 2:
+        print("Usage: python supervisor.py config.json")
+        print("Example config.json structure:")
+        print("""
+                {
+                    "video_source_path": "path/to/video.mp4",
+                    "server_config_path": "path/to/server_config.json",
+                    "server_executable_path": "path/to/server.exe",
+                    "host_config_path": "path/to/host_config.json", 
+                    "host_executable_path": "path/to/host.exe",
+                    "client_executable_path": "path/to/client.exe",
+                    "output_directory": "path/to/output",
+                    "heartbeat_port": 8080
+                }
+        """)
         sys.exit(1)
 
-    sup = ProcessSupervisor(
-        video_source_path=sys.argv[1],
-        server_config_path=sys.argv[2],
-        server_executable_path=sys.argv[3],
-        host_config_path=sys.argv[4],
-        host_executable_path=sys.argv[5],
-        client_executable_path=sys.argv[6],
-        output_directory_path=sys.argv[7],
-        heartbeat_port=sys.argv[8],
-    )
-    sup.run()
+    config_path = sys.argv[1]
+    
+    try:
+        sup = ProcessSupervisor(config_path)
+        sup.run()
+    except Exception as e:
+        print(f"[!] Failed to start supervisor: {e}")
+        sys.exit(1)
