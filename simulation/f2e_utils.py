@@ -117,16 +117,27 @@ class EventLogger:
 class FileWatcher(FileSystemEventHandler):
     """Watches for new image files in the designated directory."""
     
-    def __init__(self, file_queue: Queue, watch_dir: str, display_id: int):
+    def __init__(self, file_queue: Queue, watch_dir: str, ON_events_display_id: int, OFF_events_display_id: int):
         self.file_queue = file_queue
         self.processed_files = set()
-        self.display_id = display_id
+        self.watch_dir = watch_dir
+        self.ON_events_display_id = ON_events_display_id
+        self.OFF_events_display_id = OFF_events_display_id
 
         self.observer = Observer()
         self.observer.schedule(self, watch_dir, recursive=False)
         
     def start(self):
         self.observer.start()
+        self._scan_existing_files()
+
+    def _scan_existing_files(self):
+        """Scan for existing files and mark them as processed."""
+        pattern = os.path.join(self.watch_dir, "*.bmp").replace("\\", "/")
+        existing_files = glob.glob(pattern)
+        
+        for file in existing_files:
+            self.__process_file__(file.replace("\\", "/"))
 
     def stop(self):
         self.observer.stop()
@@ -138,9 +149,7 @@ class FileWatcher(FileSystemEventHandler):
             return
             
         file_path = event.src_path
-        if self.__is_valid_image_file__(file_path):
-            print(f"New image file detected: {file_path} (display {self.display_id})")
-            self.file_queue.put(file_path)
+        self.__process_file__(file_path)
     
     def on_moved(self, event):
         """Handle file move events (some systems trigger this instead of created)."""
@@ -148,23 +157,31 @@ class FileWatcher(FileSystemEventHandler):
             return
             
         file_path = event.dest_path
-        if self.__is_valid_image_file__(file_path):
-            print(f"New image file moved: {file_path} (display {self.display_id})")
+        self.__process_file__(file_path)
+
+    def __process_file__(self, file_path: str):
+        if self.__is_valid_image_file__(file_path, self.ON_events_display_id):
+            print(f"New image file moved: {file_path} (display {self.ON_events_display_id})")
+            self.file_queue.put(file_path)
+
+        if self.__is_valid_image_file__(file_path, self.OFF_events_display_id):
+            print(f"New image file moved: {file_path} (display {self.OFF_events_display_id})")
             self.file_queue.put(file_path)
     
-    def __is_valid_image_file__(self, file_path: str) -> bool:
+    def __is_valid_image_file__(self, file_path: str, display_id: str) -> bool:
         """Check if file is a valid image file to process."""
         if file_path in self.processed_files:
             return False
             
+        if not os.path.exists(file_path):
+            return False
+
         file_ext = Path(file_path).suffix.lower()
         if file_ext != '.bmp':
             return False
 
-        if not file_path.startswith(f"{self.display_id}_"):
-            return False
-            
-        if not os.path.exists(file_path):
+        filename = os.path.basename(file_path)
+        if not filename.startswith(f"{display_id}_"):
             return False
 
         # Wait a bit to ensure file is fully written
@@ -198,7 +215,7 @@ class FolderWatcher(FileSystemEventHandler):
         
     def _scan_existing_folders(self):
         """Scan for existing folders and mark them as processed."""
-        pattern = os.path.join(self.base_dir, f"{self.folder_prefix}_*")
+        pattern = os.path.join(self.base_dir, f"{self.folder_prefix}_*").replace("\\", "/")
         existing_folders = glob.glob(pattern)
         
         for folder in existing_folders:
