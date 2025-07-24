@@ -2,12 +2,12 @@
 """
 Frame to Event Converter
 
-This script watches a folder for newly created image frames, consumes them,
-and appends events to a text eventlog file. Each event represents a brightness
-level change with x, y, t coordinates and polarity (ON or OFF).
+This script watches a folder for newly created folders containing image frames, 
+consumes all frames in each new folder, and appends events to a text eventlog file. 
+Each event represents a brightness level change with x, y, t coordinates and polarity (ON or OFF).
 
 Usage:
-    python f2e.py <base_path> <id> <eventlog.txt> <heartbeat_port>
+    python f2e.py <base_path> <folder_prefix> <output_dir> <heartbeat_port> <display_id>
 """
 
 import argparse
@@ -19,7 +19,7 @@ import sys
 import time
 import glob
 
-from f2e_utils import SupervisorClient, EventLogger, FileWatcher
+from f2e_utils import SupervisorClient, EventLogger, FolderWatcher, FileWatcher
 from queue import Queue, Empty
 from typing import Optional, Tuple
 
@@ -68,16 +68,17 @@ def extract_events_from_image(image_path: str, time_delta: int) -> Tuple[np.ndar
     
     return x_coords, y_coords, timestamps, polarities
 
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description='Frame to Event Converter')
-    parser.add_argument('base-dir', help='Base directory to search for dynamic folders')
-    parser.add_argument('folder-id', help='Folder ID for dynamic folder detection (e.g., "rec")')
-    parser.add_argument('output', help='Output text eventlog file (.txt)')
-    parser.add_argument('heartbeat-port', type=int, help='Port for heartbeat communication')
-    parser.add_argument('command-port', type=int, help='Port for receiving commands from supervisor')
-    parser.add_argument('--time-delta', type=int, default=300, help='Discrete time delta between frames in milliseconds')
-    parser.add_argument('--batch-size', type=int, default=10, help='Batch size for processing (default: 10)')
+    parser.add_argument('base_dir', help='Base directory to search for dynamic folders')
+    parser.add_argument('folder_prefix', help='Folder prefix for dynamic folder detection (e.g., "rec")')
+    parser.add_argument('output_dir', help='Output directory for eventlog files')
+    parser.add_argument('heartbeat_port', type=int, help='Port for heartbeat communication')
+    parser.add_argument('display_id', type=str, help='Display ID from which to extract events')
+    parser.add_argument('--time_delta', type=int, default=300, help='Discrete time delta between frames in milliseconds')
+    parser.add_argument('--batch_size', type=int, default=10, help='Batch size for processing (default: 10)')
     parser.add_argument('--height', type=int, default=256, help='Image height')
     parser.add_argument('--width', type=int, default=256, help='Image width')
 
@@ -87,55 +88,66 @@ def main():
         print(f"Base directory does not exist: {args.base_dir}")
         sys.exit(1)
 
-    output_dir = os.path.dirname(args.output)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    os.makedirs(args.output_dir, exist_ok=True)
     
-    shutdown_requested = False
-    
-    def shutdown_callback():
-        nonlocal shutdown_requested
-        print("Shutdown requested by supervisor")
-        shutdown_requested = True
-    
-    supervisor_client = SupervisorClient(args.heartbeat_port, args.command_port)
-    supervisor_client.set_stop_callback(shutdown_callback)
+    supervisor_client = SupervisorClient(args.heartbeat_port)
     supervisor_client.start()
 
-    file_queue = Queue()
-    file_watcher = FileWatcher(file_queue, args.base_dir)
-    file_watcher.start()
-    print(f"Watching directory: {args.base_dir}")
-
-    event_logger = EventLogger(args.output, args.height, args.width)
+    folder_queue = Queue()
+    folder_watcher = FolderWatcher(folder_queue, args.base_dir, args.folder_prefix)
+    folder_watcher.start()
+    print(f"Watching for new folders in directory: {args.base_dir}")
     
     try:
-        while not shutdown_requested:
+        while True:
             try:
-                file_path = file_queue.get(timeout=1.0)
-                if file_path is None:
-                    time.sleep(0.05)
+                folder_path = folder_queue.get(timeout=1.0)
+                if folder_path is None:
+                    time.sleep(0.1)
                     continue
 
-                x, y, t, p = extract_events_from_image(file_path, args.time_delta)
-                event_logger.append_events(x, y, t, p)
+                eventlog_name = os.path.basename(folder_path).replace('\\', '/')
+                event_logger = EventLogger(args.output_dir, eventlog_name, args.height, args.width)
+
+                file_queue = Queue()
+                file_watcher = FileWatcher(file_queue, folder_path, args.display_id)
+                file_watcher.start()
+                print(f"Watching for new files in directory: {folder_path}")
+
+                time.sleep(0.1) # Wait for the file watcher to capture the first file
+                
+                try:
+                    while folder_queue.empty() and not file_queue.empty():
+                        file_path = file_queue.get(timeout=1.0)
+                        if file_path is None:
+                            time.sleep(0.1)
+                            continue
+
+                        x, y, t, p = extract_events_from_image(file_path, args.time_delta)
+                        event_logger.append_events(x, y, t, p)
+
+                        # Delete the file after processing
+                        os.remove(file_path)
+                finally:
+                    file_watcher.stop()
+                    event_logger.close()
 
             except Empty:
-                print(f"Empty queue. Waiting for file...")
+                # No new folders, continue waiting
+                pass
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print(f"Error processing file: {e}")
+                print(f"Error processing folder: {e}")
             finally:
-                time.sleep(0.05)
+                time.sleep(0.1)
                 
     except KeyboardInterrupt:
         print("Received keyboard interrupt")
     finally:
         print("Shutting down gracefully...")
         supervisor_client.stop()
-        file_watcher.stop()
-        event_logger.close()
+        folder_watcher.stop()
         print("Shutdown complete")
 
 if __name__ == "__main__":

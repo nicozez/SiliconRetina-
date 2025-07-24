@@ -2,13 +2,21 @@
 Example config.json structure:
 {
     "video_source_path": "path/to/video.mp4",
+    "output_directory_prefix": "prefix",
+    "display_id": "display_id",
+    "eventlog_output_dir": "path/to/eventlog_output_dir",
+
     "server_config_path": "path/to/server_config.json",
     "server_executable_path": "path/to/server.exe",
+
     "host_config_path": "path/to/host_config.json", 
     "host_executable_path": "path/to/host.exe",
+
     "client_executable_path": "path/to/client.exe",
-    "output_directory_prefix": "prefix",
-    "heartbeat_port": 8080
+    "client_heartbeat_port": 8080,
+
+    "f2e_executable_path": "path/to/f2e.exe",
+    "f2e_heartbeat_port": 8081,
 }
 """
 
@@ -23,6 +31,7 @@ import json
 import psutil
 
 CLIENT_HEARTBEAT_TIMEOUT_SECONDS = 2  # seconds
+F2E_HEARTBEAT_TIMEOUT_SECONDS = 2  # seconds
 
 def launch_process(executable_path, args=[], newConsole=False):
     working_directory = os.path.dirname(os.path.abspath(executable_path))        
@@ -119,14 +128,21 @@ class ProcessSupervisor:
                     print(f"[+] Heartbeat connection from {address} (restart #{self.restart_count})")
                     connection.settimeout(1.0)
                     
-                    with connection:
-                        heartbeat_data = connection.recv(1024)
-                        if not heartbeat_data:
-                            print(f"[!] {self.name} disconnected (restart #{self.restart_count})")
+                    while not self.shutdown_signal.is_set():
+                        try:
+                            heartbeat_data = connection.recv(1024)
+                            if not heartbeat_data:
+                                print(f"[!] {self.name} disconnected (restart #{self.restart_count})")
+                                break
+                            self.last_heartbeat_timestamp = time.time()
+                            print(f"[+] {self.name} heartbeat received")
+                        except socket.timeout:
+                            continue
+                        except Exception as e:
+                            print(f"[!] Error during heartbeat: {e}")
                             break
-                        self.last_heartbeat_timestamp = time.time()
                     
-                    print(f"[+] {self.name} heartbeat received")
+                    connection.close()
                     
                 except socket.timeout:
                     continue
@@ -135,6 +151,7 @@ class ProcessSupervisor:
         while not self.shutdown_signal.is_set():
             time.sleep(1)
             time_since_last_heartbeat = time.time() - self.last_heartbeat_timestamp
+            self.last_heartbeat_timestamp = time.time()
 
             if time_since_last_heartbeat > self.HEARTBEAT_TIMEOUT_SECONDS:
                 print(f"[!] {self.name} heartbeat timeout after {time_since_last_heartbeat:.1f}s (limit: {self.HEARTBEAT_TIMEOUT_SECONDS}s). Restarting {self.name}...")
@@ -166,14 +183,21 @@ if __name__ == "__main__":
         
     video_source_path = config['video_source_path']
     output_directory_prefix = config['output_directory_prefix']
+    display_id = config['display_id']
+    eventlog_output_dir = config['eventlog_output_dir']
 
     server_config_path = config['server_config_path']
     server_executable_path = config['server_executable_path']
+
     host_config_path = config['host_config_path']
     host_executable_path = config['host_executable_path']
+
     client_executable_path = config['client_executable_path']
-    heartbeat_port = int(config['heartbeat_port'])
-    
+    client_heartbeat_port = int(config['client_heartbeat_port'])
+
+    f2e_executable_path = config['f2e_executable_path']
+    f2e_heartbeat_port = int(config['f2e_heartbeat_port'])
+
     update_config_file(server_config_path, 'source_path', video_source_path.replace('\\', '/'))
     update_config_file(host_config_path, 'record_dir', output_directory_prefix.replace('\\', '/'))
 
@@ -181,16 +205,32 @@ if __name__ == "__main__":
     host_process = launch_process(host_executable_path)
 
     def launch_client_process():
-        return launch_process(client_executable_path, [str(heartbeat_port)], newConsole=True)
+        args = [str(client_heartbeat_port)]
+        return launch_process(client_executable_path, args, newConsole=True)
 
-    client_supervisor = ProcessSupervisor("client", launch_client_process, heartbeat_port, CLIENT_HEARTBEAT_TIMEOUT_SECONDS)
+    def launch_f2e_process():
+        # f2e.py expects: base-dir, folder-prefix, output-dir, heartbeat-port, display-id
+        args = [
+            os.path.dirname(host_executable_path),
+            output_directory_prefix, 
+            eventlog_output_dir,
+            str(f2e_heartbeat_port),
+            str(display_id)
+        ]
+        return launch_process("python3", [f2e_executable_path] + args, newConsole=True)
+
+    client_supervisor = ProcessSupervisor("client", launch_client_process, client_heartbeat_port, CLIENT_HEARTBEAT_TIMEOUT_SECONDS)
     client_supervisor.start()
+
+    f2e_supervisor = ProcessSupervisor("f2e", launch_f2e_process, f2e_heartbeat_port, F2E_HEARTBEAT_TIMEOUT_SECONDS)
+    f2e_supervisor.start()
 
     while True:
         try:
             time.sleep(0.1)
         except KeyboardInterrupt:
             client_supervisor.stop()
+            f2e_supervisor.stop()
             stop_process("host", host_process)
             stop_process("server", server_process)
             sys.exit(1)
