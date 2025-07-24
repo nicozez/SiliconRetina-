@@ -17,8 +17,7 @@ type VideoMetadata = tuple[int, int, int, int]
 class EventDataLoader:
     def __init__(self, h5_file: h5py.File):
         self.h5_file = h5_file
-        self.height = self.h5_file['images'].shape[1]
-        self.width = self.h5_file['images'].shape[2]
+        self.__infer_video_resolution__()
 
         self.x = cast(h5py.Dataset, self.h5_file['x'])
         self.y = cast(h5py.Dataset, self.h5_file['y'])
@@ -82,3 +81,11 @@ class EventDataLoader:
 
     def get_end_time(self) -> int:
         return self.t[-1]
+
+    def __infer_video_resolution__(self):
+        if 'images' in self.h5_file:
+            self.height = self.h5_file['images'].shape[1]
+            self.width = self.h5_file['images'].shape[2]
+        else:
+            self.height = self.h5_file.attrs['height']
+            self.width = self.h5_file.attrs['width']
