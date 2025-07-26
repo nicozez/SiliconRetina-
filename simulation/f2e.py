@@ -107,7 +107,7 @@ def main():
                     time.sleep(0.1)
                     continue
 
-                eventlog_name = os.path.basename(folder_path).replace('\\', '/')
+                eventlog_name = os.path.normpath(os.path.basename(folder_path))
                 event_logger = EventLogger(args.output_dir, eventlog_name, args.height, args.width)
 
                 file_queue = Queue()

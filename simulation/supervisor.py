@@ -201,8 +201,8 @@ if __name__ == "__main__":
     f2e_executable_path = config['f2e_executable_path']
     f2e_heartbeat_port = int(config['f2e_heartbeat_port'])
 
-    update_config_file(server_config_path, 'source_path', video_source_path.replace('\\', '/'))
-    update_config_file(host_config_path, 'record_dir', output_directory_prefix.replace('\\', '/'))
+    update_config_file(server_config_path, 'source_path', os.path.normpath(video_source_path))
+    update_config_file(host_config_path, 'record_dir', os.path.normpath(output_directory_prefix))
 
     server_process = launch_process(server_executable_path)
     host_process = launch_process(host_executable_path)
@@ -216,7 +216,7 @@ if __name__ == "__main__":
         args = [
             os.path.dirname(host_executable_path),
             output_directory_prefix, 
-            eventlog_output_dir,
+            os.path.normpath(eventlog_output_dir),
             str(f2e_heartbeat_port),
             str(ON_events_display_id),
             str(OFF_events_display_id)
