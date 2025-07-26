@@ -7,7 +7,7 @@ consumes all frames in each new folder, and appends events to a text eventlog fi
 Each event represents a brightness level change with x, y, t coordinates and polarity (ON or OFF).
 
 Usage:
-    python f2e.py <base_path> <folder_prefix> <output_dir> <heartbeat_port> <display_id>
+    python f2e.py <base_path> <folder_prefix> <output_dir> <heartbeat_port> <ON_events_display_id> <OFF_events_display_id>
 """
 
 import argparse
@@ -40,14 +40,14 @@ def find_latest_folder(base_dir: str, folder_id: str) -> Optional[str]:
 
     return directories[0]
 
-def extract_events_from_image(image_path: str, time_delta: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def extract_events_from_image(image_path: str, time_delta: int, display_id: str, polarity: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     filename = os.path.basename(image_path)
-    match = re.search(r'frame_(\d+)_(ON|OFF)', filename, re.IGNORECASE)
+    pattern = rf"{re.escape(display_id)}_(\d+)"
+    match = re.search(pattern, filename, re.IGNORECASE)
     if match is None:
         raise Exception()
 
     frame_number = int(match.group(1))
-    polarity = 1 if match.group(2).upper() == "ON" else 0
     base_time = frame_number * time_delta
     
     image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
@@ -76,7 +76,8 @@ def main():
     parser.add_argument('folder_prefix', help='Folder prefix for dynamic folder detection (e.g., "rec")')
     parser.add_argument('output_dir', help='Output directory for eventlog files')
     parser.add_argument('heartbeat_port', type=int, help='Port for heartbeat communication')
-    parser.add_argument('display_id', type=str, help='Display ID from which to extract events')
+    parser.add_argument('ON_events_display_id', type=str, help='Display ID from which to extract ON events')
+    parser.add_argument('OFF_events_display_id', type=str, help='Display ID from which to extract OFF events')
     parser.add_argument('--time_delta', type=int, default=300, help='Discrete time delta between frames in milliseconds')
     parser.add_argument('--batch_size', type=int, default=10, help='Batch size for processing (default: 10)')
     parser.add_argument('--height', type=int, default=256, help='Image height')
@@ -106,15 +107,15 @@ def main():
                     time.sleep(0.1)
                     continue
 
-                eventlog_name = os.path.basename(folder_path).replace('\\', '/')
+                eventlog_name = os.path.normpath(os.path.basename(folder_path))
                 event_logger = EventLogger(args.output_dir, eventlog_name, args.height, args.width)
 
                 file_queue = Queue()
-                file_watcher = FileWatcher(file_queue, folder_path, args.display_id)
+                file_watcher = FileWatcher(file_queue, folder_path, args.ON_events_display_id, args.OFF_events_display_id)
                 file_watcher.start()
                 print(f"Watching for new files in directory: {folder_path}")
 
-                time.sleep(0.1) # Wait for the file watcher to capture the first file
+                time.sleep(1) # Wait for the file watcher to capture the first file
                 
                 try:
                     while folder_queue.empty() and not file_queue.empty():
@@ -123,7 +124,11 @@ def main():
                             time.sleep(0.1)
                             continue
 
-                        x, y, t, p = extract_events_from_image(file_path, args.time_delta)
+                        filename = os.path.basename(file_path)
+                        display_id = args.ON_events_display_id if filename.startswith(f"{args.ON_events_display_id}_") else args.OFF_events_display_id
+                        polarity = 1 if filename.startswith(f"{args.ON_events_display_id}_") else 0
+
+                        x, y, t, p = extract_events_from_image(file_path, args.time_delta, display_id, polarity)
                         event_logger.append_events(x, y, t, p)
 
                         # Delete the file after processing
@@ -138,7 +143,8 @@ def main():
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print(f"Error processing folder: {e}")
+                print(f"Error processing folder: {folder_path}")
+                print(e)
             finally:
                 time.sleep(0.1)
                 

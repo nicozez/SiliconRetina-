@@ -3,8 +3,10 @@ Example config.json structure:
 {
     "video_source_path": "path/to/video.mp4",
     "output_directory_prefix": "prefix",
-    "display_id": "display_id",
     "eventlog_output_dir": "path/to/eventlog_output_dir",
+
+    "ON_events_display_id": "ON_events_display_id",
+    "OFF_events_display_id": "OFF_events_display_id",
 
     "server_config_path": "path/to/server_config.json",
     "server_executable_path": "path/to/server.exe",
@@ -151,7 +153,6 @@ class ProcessSupervisor:
         while not self.shutdown_signal.is_set():
             time.sleep(1)
             time_since_last_heartbeat = time.time() - self.last_heartbeat_timestamp
-            self.last_heartbeat_timestamp = time.time()
 
             if time_since_last_heartbeat > self.HEARTBEAT_TIMEOUT_SECONDS:
                 print(f"[!] {self.name} heartbeat timeout after {time_since_last_heartbeat:.1f}s (limit: {self.HEARTBEAT_TIMEOUT_SECONDS}s). Restarting {self.name}...")
@@ -183,8 +184,10 @@ if __name__ == "__main__":
         
     video_source_path = config['video_source_path']
     output_directory_prefix = config['output_directory_prefix']
-    display_id = config['display_id']
     eventlog_output_dir = config['eventlog_output_dir']
+
+    ON_events_display_id = config['ON_events_display_id']
+    OFF_events_display_id = config['OFF_events_display_id']
 
     server_config_path = config['server_config_path']
     server_executable_path = config['server_executable_path']
@@ -198,8 +201,8 @@ if __name__ == "__main__":
     f2e_executable_path = config['f2e_executable_path']
     f2e_heartbeat_port = int(config['f2e_heartbeat_port'])
 
-    update_config_file(server_config_path, 'source_path', video_source_path.replace('\\', '/'))
-    update_config_file(host_config_path, 'record_dir', output_directory_prefix.replace('\\', '/'))
+    update_config_file(server_config_path, 'source_path', os.path.normpath(video_source_path))
+    update_config_file(host_config_path, 'record_dir', os.path.normpath(output_directory_prefix))
 
     server_process = launch_process(server_executable_path)
     host_process = launch_process(host_executable_path)
@@ -213,9 +216,10 @@ if __name__ == "__main__":
         args = [
             os.path.dirname(host_executable_path),
             output_directory_prefix, 
-            eventlog_output_dir,
+            os.path.normpath(eventlog_output_dir),
             str(f2e_heartbeat_port),
-            str(display_id)
+            str(ON_events_display_id),
+            str(OFF_events_display_id)
         ]
         return launch_process("python3", [f2e_executable_path] + args, newConsole=True)
 
